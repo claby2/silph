@@ -1,9 +1,10 @@
 :root {
-  --bg: #11151a;
-  --panel: #1a2027;
-  --border: #2a323c;
+  --bg: #0f1317;
+  --panel: #161c23;
+  --panel-2: #1c242e;
+  --border: #262f3a;
   --text: #d8dee6;
-  --muted: #7d8a99;
+  --muted: #8494a5;
   --accent: #5ab0f7;
   --ok: #4fc26a;
   --bad: #e05d5d;
@@ -16,14 +17,27 @@ body {
   background: var(--bg);
   color: var(--text);
   font: 14px/1.5 system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
 }
 
-header {
+/* --- top bar --------------------------------------------------------------- */
+
+#topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
   padding: 0.6rem 1rem;
   border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+#topbar nav {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 0;
 }
 
 #brand {
@@ -33,70 +47,199 @@ header {
   text-decoration: none;
 }
 
+#crumb {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+#status {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+/* Segmented range picker */
+.seg {
+  display: inline-flex;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 2px;
+}
+.seg button {
+  background: none;
+  border: 0;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.25rem 0.65rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.seg button:hover { color: var(--text); }
+.seg button.active {
+  background: var(--panel-2);
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+/* --- layout ---------------------------------------------------------------- */
+
 main {
-  max-width: 1000px;
+  max-width: 1200px;
   margin: 0 auto;
   padding: 1rem;
 }
 
-table {
+.grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(30rem, 100%), 1fr));
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+/* --- host list ------------------------------------------------------------- */
+
+/* Scoped to the host-list panel: uPlot's legend is also a <table>. */
+.panel table {
   width: 100%;
   border-collapse: collapse;
 }
 
-th, td {
+.panel th, .panel td {
   text-align: left;
-  padding: 0.5rem 0.75rem;
+  padding: 0.55rem 0.9rem;
   border-bottom: 1px solid var(--border);
 }
 
-th { color: var(--muted); font-weight: 600; }
+.panel th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.panel tbody tr:last-child td { border-bottom: none; }
 
 tr.host { cursor: pointer; }
-tr.host:hover { background: var(--panel); }
+tr.host:hover { background: var(--panel-2); }
+.host-name { font-weight: 600; }
 
 .dot {
   display: inline-block;
-  width: 0.6rem;
-  height: 0.6rem;
+  width: 0.55rem;
+  height: 0.55rem;
   border-radius: 50%;
-  margin-right: 0.5rem;
+  margin-right: 0.55rem;
 }
 .dot.up { background: var(--ok); }
 .dot.down { background: var(--bad); }
 
+.pill {
+  display: inline-block;
+  padding: 0.1rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+.pill.up { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.pill.down { color: var(--bad); background: color-mix(in srgb, var(--bad) 14%, transparent); }
+
 .error { color: var(--bad); }
 .muted { color: var(--muted); }
+.small { font-size: 0.78rem; }
+.empty { padding: 1.5rem; text-align: center; }
 
-#controls button {
-  background: var(--panel);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 0.25rem 0.6rem;
-  margin-left: 0.25rem;
-  cursor: pointer;
-}
-#controls button.active {
-  border-color: var(--accent);
-  color: var(--accent);
-}
+/* --- chart cards ------------------------------------------------------------ */
 
 .chart {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 0.75rem;
-  margin-bottom: 1rem;
+  border-radius: 10px;
+  padding: 0.8rem 1rem 0.6rem;
+  min-width: 0;
+}
+
+.chart > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
 }
 
 .chart h3 {
-  margin: 0 0 0.5rem;
-  font-size: 0.95rem;
-  color: var(--muted);
+  margin: 0;
+  font-size: 0.92rem;
   font-weight: 600;
 }
 
-/* uPlot dark-theme adjustments */
-.u-legend { color: var(--text); }
-.uplot .u-axis { color: var(--muted); }
+.chart .unit {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.plot { min-height: 244px; }
+
+.plot.loading {
+  border-radius: 6px;
+  background: linear-gradient(100deg, var(--panel-2) 40%, #232d38 50%, var(--panel-2) 60%);
+  background-size: 200% 100%;
+  animation: shimmer 1.2s linear infinite;
+}
+@keyframes shimmer {
+  to { background-position: -200% 0; }
+}
+
+.plot .empty { padding-top: 5rem; }
+
+/* --- uPlot dark-theme adjustments ------------------------------------------ */
+
+.uplot { font-family: inherit; }
+
+.uplot .u-legend {
+  font-size: 11px;
+  color: var(--muted);
+  text-align: left;
+  margin-top: 2px;
+}
+.uplot .u-legend th { font-weight: 500; padding: 0; }
+.uplot .u-legend .u-marker {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+}
+.uplot .u-legend .u-value {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.uplot .u-legend tr.u-off th,
+.uplot .u-legend tr.u-off .u-value { opacity: 0.4; }
+
+.uplot .u-select { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+
+/* --- small screens ---------------------------------------------------------- */
+
+@media (max-width: 640px) {
+  #topbar { padding: 0.5rem 0.75rem; }
+  #status { display: none; }
+  main { padding: 0.75rem; }
+  .panel th, .panel td { padding: 0.45rem 0.6rem; }
+  .chart { padding: 0.6rem 0.7rem 0.45rem; }
+  .plot { min-height: 194px; }
+  .plot .empty { padding-top: 3.5rem; }
+}

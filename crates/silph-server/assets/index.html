@@ -3,14 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
   <title>silph</title>
   <link rel="stylesheet" href="/assets/vendor/uplot.min.css">
   <link rel="stylesheet" href="/assets/style.css">
 </head>
 <body>
-  <header>
-    <a href="#/" id="brand">silph</a>
-    <div id="controls"></div>
+  <header id="topbar">
+    <nav>
+      <a href="#/" id="brand">silph</a>
+      <span id="crumb"></span>
+    </nav>
+    <div id="toolbar">
+      <span id="status"></span>
+      <div id="controls"></div>
+    </div>
   </header>
   <main id="view"></main>
   <script src="/assets/vendor/uplot.iife.min.js"></script>
