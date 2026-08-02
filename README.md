@@ -46,3 +46,48 @@ API lives under `/api/`.
 Scrapes are authenticated with a static bearer token, but transport is
 plain HTTP and the dashboard/API has no auth — bind to localhost or put a
 reverse proxy in front for TLS/auth.
+
+## NixOS
+
+The flake ships a NixOS module. Add silph as an input, import
+`silph.nixosModules.default`, and configure either or both services:
+
+```nix
+{
+  inputs.silph.url = "github:claby2/silph";
+}
+```
+
+```nix
+# On each monitored host:
+services.silph.collector = {
+  enable = true;
+  settings = {
+    listen = "0.0.0.0:9100";
+    # { _secret = ...; } loads the value from a file at service start
+    # (e.g. an agenix/sops-nix path), keeping it out of the Nix store.
+    token._secret = "/run/secrets/silph-token";
+  };
+};
+networking.firewall.allowedTCPPorts = [ 9100 ];
+
+# On the monitoring server:
+services.silph.server = {
+  enable = true;
+  settings = {
+    targets = [
+      {
+        name = "web-1";
+        url = "http://10.0.0.2:9100";
+        token._secret = "/run/secrets/silph-token";
+      }
+    ];
+  };
+};
+```
+
+`settings` maps 1:1 to the TOML config (see `examples/`), so anything the
+binaries accept can be set without module support; any string value can be
+replaced by `{ _secret = "/path"; }`. The server's database lives in
+`/var/lib/silph` by default (override with `settings.data_dir`); both
+services run as hardened systemd units under dynamic users.
