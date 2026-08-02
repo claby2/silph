@@ -1,0 +1,102 @@
+:root {
+  --bg: #11151a;
+  --panel: #1a2027;
+  --border: #2a323c;
+  --text: #d8dee6;
+  --muted: #7d8a99;
+  --accent: #5ab0f7;
+  --ok: #4fc26a;
+  --bad: #e05d5d;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 system-ui, sans-serif;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+#brand {
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 1.1rem;
+  text-decoration: none;
+}
+
+main {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th, td {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+th { color: var(--muted); font-weight: 600; }
+
+tr.host { cursor: pointer; }
+tr.host:hover { background: var(--panel); }
+
+.dot {
+  display: inline-block;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  margin-right: 0.5rem;
+}
+.dot.up { background: var(--ok); }
+.dot.down { background: var(--bad); }
+
+.error { color: var(--bad); }
+.muted { color: var(--muted); }
+
+#controls button {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.25rem 0.6rem;
+  margin-left: 0.25rem;
+  cursor: pointer;
+}
+#controls button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.chart {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.chart h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+/* uPlot dark-theme adjustments */
+.u-legend { color: var(--text); }
+.uplot .u-axis { color: var(--muted); }

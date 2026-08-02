@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/claby2/silph"
+
+[workspace.dependencies]
+silph-core = { path = "crates/silph-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+tokio = { version = "1", default-features = false }
+axum = "0.8"
+toml = "0.8"
+humantime-serde = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# Pinned exactly: pre-1.0 API churn (see README design notes).
+tsink = "=0.10.2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = "thin"

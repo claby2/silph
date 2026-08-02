@@ -1,0 +1,20 @@
+# silph-server configuration
+
+# Address to listen on (query API + dashboard). The dashboard has no built-in
+# auth: keep this on localhost or behind an authenticating reverse proxy.
+listen = "127.0.0.1:8080"
+
+# Directory for the time-series database.
+data_dir = "./data"
+
+scrape_interval = "15s"
+scrape_timeout = "5s"
+
+# Data older than this is expired.
+retention = "30d"
+
+# One entry per monitored host.
+[[targets]]
+name = "example-host"
+url = "http://127.0.0.1:9100"
+token = "change-me"

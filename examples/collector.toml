@@ -1,0 +1,12 @@
+# silph-collector configuration
+
+# Address to listen on.
+listen = "0.0.0.0:9100"
+
+# Bearer token the server must present when scraping.
+token = "change-me"
+
+# Optional: explicit mount points for disk metrics. When omitted, local
+# filesystems (ext4, xfs, btrfs, ...) are auto-detected from /proc/mounts.
+#[disk]
+#mounts = ["/", "/home"]
