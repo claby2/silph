@@ -68,6 +68,7 @@
                   services.silph.server = {
                     enable = true;
                     settings = {
+                      listen = "127.0.0.1:8080";
                       scrape_interval = "30s";
                       targets = [
                         {

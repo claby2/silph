@@ -6,7 +6,6 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    #[serde(default = "default_listen")]
     pub listen: String,
     /// Directory for the time-series database.
     pub data_dir: PathBuf,
@@ -28,10 +27,6 @@ pub struct Target {
     /// Collector base URL, e.g. `http://10.0.0.2:9100`.
     pub url: String,
     pub token: Option<String>,
-}
-
-fn default_listen() -> String {
-    "127.0.0.1:8080".to_string()
 }
 
 fn default_scrape_interval() -> Duration {
