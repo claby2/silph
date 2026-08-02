@@ -23,10 +23,25 @@ pub struct AppState {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/api/config", get(config))
         .route("/api/hosts", get(hosts))
         .route("/api/metrics", get(metrics))
         .route("/api/query", get(query))
         .with_state(state)
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigInfo {
+    scrape_interval_ms: u64,
+}
+
+/// Server settings the dashboard needs; the client aligns its query step to
+/// the scrape interval so downsample buckets are never narrower than the
+/// sample cadence (which would render as spurious gaps).
+async fn config(State(state): State<AppState>) -> Json<ConfigInfo> {
+    Json(ConfigInfo {
+        scrape_interval_ms: state.scrape_interval.as_millis() as u64,
+    })
 }
 
 #[derive(Debug, Serialize)]

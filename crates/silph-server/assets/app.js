@@ -122,10 +122,17 @@ async function renderHost(name) {
   title.textContent = name;
   view.appendChild(title);
 
-  const metrics = await fetchJson("/api/metrics");
+  const [metrics, config] = await Promise.all([
+    fetchJson("/api/metrics"),
+    fetchJson("/api/config"),
+  ]);
   const end = Date.now();
   const start = end - rangeMs;
-  const step = Math.max(1000, Math.round(rangeMs / 300));
+  // Round the step up to a multiple of the scrape interval so every bucket
+  // spans at least one sample slot; otherwise empty buckets alias into
+  // periodic gaps in the charts. Gaps then only mean genuinely missed scrapes.
+  const interval = Math.max(1000, config.scrape_interval_ms);
+  const step = Math.ceil(Math.max(1, rangeMs / 300) / interval) * interval;
 
   for (const metric of metrics) {
     const box = document.createElement("div");

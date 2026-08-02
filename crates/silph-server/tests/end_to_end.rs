@@ -72,6 +72,16 @@ async fn scrape_store_query() {
     }))
     .await;
 
+    let config: serde_json::Value = client
+        .get(format!("{api_url}/api/config"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(config["scrape_interval_ms"], 15_000);
+
     let hosts_json: serde_json::Value = client
         .get(format!("{api_url}/api/hosts"))
         .send()
