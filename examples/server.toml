@@ -1,7 +1,8 @@
 # silph-server configuration
 
-# Address to listen on (query API + dashboard).
-listen = "0.0.0.0:8080"
+# Address to listen on (query API + dashboard). Neither has authentication,
+# so keep this on loopback unless a reverse proxy in front provides TLS/auth.
+listen = "127.0.0.1:8080"
 
 # Directory for the time-series database.
 data_dir = "./data"

@@ -94,6 +94,30 @@
               eval.config.systemd.units."silph-server.service".text
             ]
           );
+
+        # The module validates rendered configs with the binaries' own
+        # parser at build time (--check-config; see nix/module.nix), so no
+        # required key needs to be special-cased in Nix. Exercise the
+        # checker directly: the shipped examples must pass, and an empty
+        # config — what an enable-only module config renders — must fail
+        # before deploy, naming the missing field.
+        config-check =
+          let
+            silph = self.packages.${pkgs.system}.silph;
+          in
+          pkgs.runCommand "silph-config-check" { } ''
+            ${silph}/bin/silph-collector --config ${./examples/collector.toml} --check-config
+            ${silph}/bin/silph-server --config ${./examples/server.toml} --check-config
+
+            touch empty.toml
+            for daemon in silph-collector silph-server; do
+              if ${silph}/bin/$daemon --config empty.toml --check-config 2>err; then
+                echo "$daemon accepted an empty config"; exit 1
+              fi
+              grep "missing field" err
+            done
+            touch $out
+          '';
       });
     };
 }

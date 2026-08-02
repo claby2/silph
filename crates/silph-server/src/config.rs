@@ -67,4 +67,25 @@ mod tests {
         assert_eq!(config.targets.len(), 1);
         assert_eq!(config.targets[0].name, "web-1");
     }
+
+    #[test]
+    fn missing_listen_is_a_clear_error() {
+        let err = toml::from_str::<Config>(r#"data_dir = "/var/lib/silph""#).unwrap_err();
+        assert!(
+            err.to_string().contains("listen"),
+            "error should name the missing field: {err}"
+        );
+    }
+
+    #[test]
+    fn example_config_parses_and_binds_loopback() {
+        let config: Config = toml::from_str(include_str!("../../../examples/server.toml")).unwrap();
+        // The query API and dashboard have no authentication, so the
+        // example everyone copies must not expose them to the network.
+        let addr: std::net::SocketAddr = config.listen.parse().unwrap();
+        assert!(
+            addr.ip().is_loopback(),
+            "examples/server.toml must bind loopback, got {addr}"
+        );
+    }
 }

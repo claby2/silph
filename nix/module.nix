@@ -33,8 +33,9 @@ let
       description = ''
         Configuration for the silph ${name}, rendered verbatim to TOML;
         see `examples/${name}.toml` in the silph repository for the
-        available keys. Omitted keys use the ${name}'s defaults; unknown
-        keys are rejected at service start.
+        available keys. The rendered config is validated with the
+        ${name}'s own parser at build time, so missing required keys or
+        unknown keys fail the rebuild rather than the service.
 
         Any string value may instead be `{ _secret = "/path"; }` to
         load it from a file at service start, keeping it out of the
@@ -117,7 +118,18 @@ let
         name = "secret-${toString i}";
         inherit path;
       }) secrets;
-      configFile = settingsFormat.generate "${fullName}.toml" (hideSecrets cfg.settings);
+      # Validated with the binary's own parser so any config the parser
+      # rejects (missing required key, unknown key, bad type) fails the
+      # rebuild instead of crash-looping the service. Secret placeholders
+      # are plain strings, so they pass validation unharmed.
+      configFile =
+        let
+          rendered = settingsFormat.generate "${fullName}.toml" (hideSecrets cfg.settings);
+        in
+        pkgs.runCommand "${fullName}-checked.toml" { } ''
+          ${lib.getExe' cfg.package fullName} --config ${rendered} --check-config
+          cp ${rendered} $out
+        '';
       configPath = if hasSecrets then "/run/${fullName}/config.toml" else configFile;
     in
     {

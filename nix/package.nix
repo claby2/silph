@@ -10,6 +10,8 @@ rustPlatform.buildRustPackage {
       ../Cargo.toml
       ../Cargo.lock
       ../crates
+      # The config tests parse the example configs to keep them honest.
+      ../examples
     ];
   };
   cargoLock.lockFile = ../Cargo.lock;

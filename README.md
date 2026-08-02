@@ -40,8 +40,9 @@ silph-server --config server.toml
 ```
 
 See `examples/collector.toml` and `examples/server.toml` for annotated
-configs. The dashboard is served at the server's listen address; the query
-API lives under `/api/`.
+configs; required keys have no defaults, and `--check-config` validates a
+config without starting the daemon. The dashboard is served at the
+server's listen address; the query API lives under `/api/`.
 
 Scrapes are authenticated with a static bearer token, but transport is
 plain HTTP and the dashboard/API has no auth — bind to localhost or put a
@@ -76,7 +77,8 @@ services.silph.server = {
 binaries accept can be set without module support; any string value can be
 replaced by `{ _secret = "/path"; }`, which loads it from a file at service
 start (e.g. an agenix/sops-nix path), keeping it out of the Nix store. The
-server's database lives in `/var/lib/silph` by default (override with
-`settings.data_dir`); both services run as hardened systemd units under
-dynamic users. Remember to open the collector's `listen` port in the
-firewall.
+rendered config is validated at build time, so a missing required key
+fails the rebuild rather than the service. The server's database lives in
+`/var/lib/silph` by default (override with `settings.data_dir`); both
+services run as hardened systemd units under dynamic users. Remember to
+open the collector's `listen` port in the firewall.

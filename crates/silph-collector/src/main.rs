@@ -9,6 +9,9 @@ struct Args {
     /// Path to the TOML config file.
     #[arg(short, long)]
     config: String,
+    /// Validate the config file and exit without starting the daemon.
+    #[arg(long)]
+    check_config: bool,
 }
 
 fn main() -> ExitCode {
@@ -30,6 +33,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let config: Config = toml::from_str(&std::fs::read_to_string(&args.config)?)?;
+    if args.check_config {
+        return Ok(());
+    }
     let app = silph_collector::router(config.token.as_deref(), config.collect_config());
 
     // Current-thread runtime: the collector serves one client at a trickle.
