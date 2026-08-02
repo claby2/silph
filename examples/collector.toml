@@ -3,7 +3,8 @@
 # Address to listen on.
 listen = "0.0.0.0:9100"
 
-# Bearer token the server must present when scraping.
+# Optional: bearer token the server must present when scraping. When omitted,
+# /metrics is served unauthenticated (like node_exporter's default).
 token = "change-me"
 
 # Optional: explicit mount points for disk metrics. When omitted, local

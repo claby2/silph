@@ -9,6 +9,8 @@ description = "Shared metric definitions for silph"
 [dependencies]
 serde = { workspace = true }
 libc = { workspace = true }
+procfs = { workspace = true }
+tokio = { workspace = true, features = ["signal", "macros"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }

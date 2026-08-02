@@ -12,15 +12,16 @@ use silph_core::{CollectConfig, METRICS, MetricsResponse};
 
 #[derive(Clone)]
 struct AppState {
-    token: Arc<str>,
+    /// `None` serves `/metrics` unauthenticated.
+    token: Option<Arc<str>>,
     collect_cfg: Arc<CollectConfig>,
 }
 
 /// Build the collector's HTTP router. Factored out of `main` so the server's
 /// integration tests can run a collector in-process.
-pub fn router(token: &str, collect_cfg: CollectConfig) -> Router {
+pub fn router(token: Option<&str>, collect_cfg: CollectConfig) -> Router {
     let state = AppState {
-        token: token.into(),
+        token: token.map(Into::into),
         collect_cfg: Arc::new(collect_cfg),
     };
     Router::new()
@@ -29,6 +30,9 @@ pub fn router(token: &str, collect_cfg: CollectConfig) -> Router {
             state.clone(),
             require_bearer,
         ))
+        // Unauthenticated liveness probe (registered after the auth layer):
+        // lets systemd, load balancers, or uptime checks verify the process is
+        // serving without holding the token or seeing metrics.
         .route("/healthz", get(|| async { "ok" }))
         .with_state(state)
 }
@@ -38,13 +42,18 @@ async fn require_bearer(
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    // No token configured: serve unauthenticated, matching node_exporter's
+    // default-open behaviour.
+    let Some(expected) = &state.token else {
+        return Ok(next.run(request).await);
+    };
     let presented = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    if !constant_time_eq(presented.as_bytes(), state.token.as_bytes()) {
+    if !constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
         return Err(StatusCode::UNAUTHORIZED);
     }
     Ok(next.run(request).await)

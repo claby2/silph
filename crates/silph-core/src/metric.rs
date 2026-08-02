@@ -103,5 +103,8 @@ pub trait Metric: Sync {
 
     fn collect(&self, cfg: &CollectConfig) -> io::Result<Vec<(MetricKey, f64)>>;
 
+    /// Server-side only: turns raw snapshots into the points to store, using
+    /// `prev` for counter deltas. Collectors ship raw values and never call
+    /// this.
     fn process(&self, prev: Option<&RawSnapshot>, curr: &RawSnapshot) -> Vec<Point>;
 }

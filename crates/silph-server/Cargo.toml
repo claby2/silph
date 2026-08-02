@@ -15,6 +15,7 @@ silph-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
+clap = { workspace = true }
 humantime-serde = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "signal", "time"] }

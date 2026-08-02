@@ -20,3 +20,15 @@ pub static METRICS: &[&dyn Metric] = &[
     &metrics::memory::Memory,
     &metrics::disk::Disk,
 ];
+
+/// Resolves on SIGINT or SIGTERM. Both binaries hand this to axum's
+/// `with_graceful_shutdown`, so in-flight requests finish and `main` returns
+/// for an orderly exit (the server flushes storage after serve returns).
+pub async fn shutdown_signal() {
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("install SIGTERM handler");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = sigterm.recv() => {}
+    }
+}

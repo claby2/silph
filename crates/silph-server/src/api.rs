@@ -32,7 +32,7 @@ pub fn router(state: AppState) -> Router {
 
 #[derive(Debug, Serialize)]
 struct ConfigInfo {
-    scrape_interval_ms: u64,
+    scrape_interval_ms: u128,
 }
 
 /// Server settings the dashboard needs; the client aligns its query step to
@@ -40,7 +40,7 @@ struct ConfigInfo {
 /// sample cadence (which would render as spurious gaps).
 async fn config(State(state): State<AppState>) -> Json<ConfigInfo> {
     Json(ConfigInfo {
-        scrape_interval_ms: state.scrape_interval.as_millis() as u64,
+        scrape_interval_ms: state.scrape_interval.as_millis(),
     })
 }
 

@@ -131,7 +131,13 @@ async function renderHost(name) {
   // Round the step up to a multiple of the scrape interval so every bucket
   // spans at least one sample slot; otherwise empty buckets alias into
   // periodic gaps in the charts. Gaps then only mean genuinely missed scrapes.
-  const interval = Math.max(1000, config.scrape_interval_ms);
+  // scrape_interval_ms is a u128 on the wire; past Number.MAX_SAFE_INTEGER it
+  // parses imprecisely (or as Infinity), so clamp — any such interval is
+  // effectively "huge" and the step math must stay finite.
+  const interval = Math.max(
+    1000,
+    Math.min(Number(config.scrape_interval_ms), Number.MAX_SAFE_INTEGER)
+  );
   const step = Math.ceil(Math.max(1, rangeMs / 300) / interval) * interval;
 
   for (const metric of metrics) {

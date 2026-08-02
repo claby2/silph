@@ -20,7 +20,7 @@ async fn serve(app: axum::Router) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scrape_store_query() {
-    let collector_url = serve(silph_collector::router(TOKEN, Default::default())).await;
+    let collector_url = serve(silph_collector::router(Some(TOKEN), Default::default())).await;
 
     let data_dir = tempfile::tempdir().unwrap();
     let store = Store::open(data_dir.path(), Duration::from_secs(3600)).unwrap();

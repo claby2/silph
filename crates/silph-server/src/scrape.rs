@@ -19,17 +19,24 @@ pub struct HostState {
     pub instances: BTreeMap<&'static str, BTreeSet<String>>,
 }
 
+/// How stale a host's last successful scrape may be, in scrape intervals,
+/// before it's reported down; 2.5 tolerates one missed scrape without flapping.
+const UP_THRESHOLD_INTERVALS: f64 = 2.5;
+
 impl HostState {
-    /// A host is up if its last successful scrape is recent enough; 2.5
-    /// intervals tolerates one missed scrape without flapping.
+    /// A host is up if its last successful scrape is recent enough.
     pub fn up(&self, now_ms: i64, scrape_interval: Duration) -> bool {
-        self.last_ok_ms
-            .is_some_and(|ok| now_ms - ok < (scrape_interval.as_millis() as i64 * 5) / 2)
+        let threshold_ms = (scrape_interval.as_millis() as f64 * UP_THRESHOLD_INTERVALS) as i64;
+        self.last_ok_ms.is_some_and(|ok| now_ms - ok < threshold_ms)
     }
 }
 
 pub type Hosts = Arc<RwLock<BTreeMap<String, HostState>>>;
 
+/// Current time in milliseconds since the Unix epoch. Signed because
+/// timestamps get subtracted (staleness checks, bucket indexing) and unsigned
+/// differences would underflow on clock skew; i64 also matches tsink's
+/// DataPoint timestamp type, so no conversion at the storage boundary.
 pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

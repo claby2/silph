@@ -1,4 +1,4 @@
-//! CPU usage, from the aggregate `cpu` line of `/proc/stat`.
+//! CPU usage, from the aggregate line of `/proc/stat` via procfs.
 //!
 //! The collector reports raw jiffy counters; the server computes a busy
 //! percentage from the delta between consecutive scrapes, so no wall-clock or
@@ -6,13 +6,14 @@
 
 use std::io;
 
+use procfs::prelude::*;
+
 use crate::key::MetricKey;
 use crate::metric::{CollectConfig, Metric, OutputSpec, Point, RawSnapshot, Unit};
 
-/// Aggregate-line fields in `/proc/stat` order. Older kernels emit fewer
-/// trailing fields (e.g. no `steal` before 2.6.11); missing ones are simply not
-/// reported. `guest`/`guest_nice` are excluded: the kernel already accounts
-/// guest time inside `user`/`nice`.
+/// All reported wire fields. Fields absent on older kernels (e.g. `steal`
+/// before 2.6.11) are simply not reported. `guest`/`guest_nice` are excluded:
+/// the kernel already accounts guest time inside `user`/`nice`.
 const FIELDS: [&str; 8] = [
     "cpu_user",
     "cpu_nice",
@@ -42,7 +43,26 @@ impl Metric for Cpu {
     }
 
     fn collect(&self, _cfg: &CollectConfig) -> io::Result<Vec<(MetricKey, f64)>> {
-        parse_proc_stat(&std::fs::read_to_string("/proc/stat")?)
+        let cpu = procfs::KernelStats::current()
+            .map_err(io::Error::other)?
+            .total;
+        let mut out = vec![
+            (MetricKey::new("cpu_user"), cpu.user as f64),
+            (MetricKey::new("cpu_nice"), cpu.nice as f64),
+            (MetricKey::new("cpu_system"), cpu.system as f64),
+            (MetricKey::new("cpu_idle"), cpu.idle as f64),
+        ];
+        for (name, value) in [
+            ("cpu_iowait", cpu.iowait),
+            ("cpu_irq", cpu.irq),
+            ("cpu_softirq", cpu.softirq),
+            ("cpu_steal", cpu.steal),
+        ] {
+            if let Some(value) = value {
+                out.push((MetricKey::new(name), value as f64));
+            }
+        }
+        Ok(out)
     }
 
     fn process(&self, prev: Option<&RawSnapshot>, curr: &RawSnapshot) -> Vec<Point> {
@@ -64,29 +84,6 @@ impl Metric for Cpu {
     }
 }
 
-fn parse_proc_stat(contents: &str) -> io::Result<Vec<(MetricKey, f64)>> {
-    let line = contents
-        .lines()
-        .find(|l| l.starts_with("cpu "))
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no aggregate cpu line"))?;
-    let values = line
-        .split_ascii_whitespace()
-        .skip(1)
-        .map(|v| {
-            v.parse::<f64>()
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-        })
-        .collect::<io::Result<Vec<f64>>>()?;
-    if values.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "empty cpu line"));
-    }
-    Ok(FIELDS
-        .iter()
-        .zip(values)
-        .map(|(name, value)| (MetricKey::new(*name), value))
-        .collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,26 +100,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_modern_10_field_line() {
-        let fixture = "cpu  1000 20 300 4000 50 6 7 8 9 10\n\
-                       cpu0 500 10 150 2000 25 3 3 4 4 5\n\
-                       intr 12345\n";
-        let parsed = parse_proc_stat(fixture).unwrap();
-        assert_eq!(parsed.len(), 8); // guest fields dropped
-        assert_eq!(parsed[0], (MetricKey::new("cpu_user"), 1000.0));
-        assert_eq!(parsed[7], (MetricKey::new("cpu_steal"), 8.0));
-    }
-
-    #[test]
-    fn parses_old_kernel_with_fewer_fields() {
-        let parsed = parse_proc_stat("cpu  100 0 50 800\n").unwrap();
-        assert_eq!(parsed.len(), 4);
-        assert_eq!(parsed[3], (MetricKey::new("cpu_idle"), 800.0));
-    }
-
-    #[test]
-    fn rejects_missing_cpu_line() {
-        assert!(parse_proc_stat("intr 1 2 3\n").is_err());
+    fn collect_reports_monotonic_jiffies() {
+        let values = Cpu.collect(&CollectConfig::default()).unwrap();
+        // The always-present fields come first; every value is a counter >= 0.
+        assert!(values.len() >= 4);
+        assert_eq!(values[0].0, MetricKey::new("cpu_user"));
+        assert!(values.iter().all(|(_, v)| *v >= 0.0));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Disk usage per mount point, from `/proc/mounts` + `statvfs(3)`.
+//! Disk usage per mount point, from `/proc/mounts` (via procfs) + `statvfs(3)`.
 //!
 //! Instanced metric: wire keys look like `disk_total:/home`. Mounts are either
 //! listed explicitly in the collector config or auto-detected by filesystem
@@ -6,6 +6,8 @@
 
 use std::ffi::CString;
 use std::io;
+
+use procfs::MountEntry;
 
 use crate::key::MetricKey;
 use crate::metric::{CollectConfig, Metric, OutputSpec, Point, RawSnapshot, Unit};
@@ -43,7 +45,7 @@ impl Metric for Disk {
     fn collect(&self, cfg: &CollectConfig) -> io::Result<Vec<(MetricKey, f64)>> {
         let mounts = match &cfg.disk_mounts {
             Some(mounts) => mounts.clone(),
-            None => select_mounts(&std::fs::read_to_string("/proc/mounts")?),
+            None => select_mounts(&procfs::mounts().map_err(io::Error::other)?),
         };
         let mut out = Vec::new();
         for mount in mounts {
@@ -79,47 +81,22 @@ impl Metric for Disk {
     }
 }
 
-/// Pick mount points from `/proc/mounts` contents: allowlisted filesystem
-/// types, first mount per device (bind mounts and btrfs subvolumes repeat the
-/// device).
-fn select_mounts(proc_mounts: &str) -> Vec<String> {
-    let mut seen_devices = Vec::new();
+/// Pick mount points: allowlisted filesystem types, first mount per device
+/// (bind mounts and btrfs subvolumes repeat the device). procfs has already
+/// unescaped the octal sequences `/proc/mounts` uses for spaces etc.
+fn select_mounts(entries: &[MountEntry]) -> Vec<String> {
+    let mut seen_devices: Vec<&str> = Vec::new();
     let mut mounts = Vec::new();
-    for line in proc_mounts.lines() {
-        let mut fields = line.split_ascii_whitespace();
-        let (Some(device), Some(mount), Some(fstype)) =
-            (fields.next(), fields.next(), fields.next())
-        else {
-            continue;
-        };
-        if !FSTYPE_ALLOWLIST.contains(&fstype) || seen_devices.contains(&device) {
+    for entry in entries {
+        if !FSTYPE_ALLOWLIST.contains(&entry.fs_vfstype.as_str())
+            || seen_devices.contains(&entry.fs_spec.as_str())
+        {
             continue;
         }
-        seen_devices.push(device);
-        mounts.push(unescape_mount(mount));
+        seen_devices.push(&entry.fs_spec);
+        mounts.push(entry.fs_file.clone());
     }
     mounts
-}
-
-/// `/proc/mounts` escapes space, tab, newline, and backslash as octal (`\040`).
-fn unescape_mount(mount: &str) -> String {
-    let mut out = String::with_capacity(mount.len());
-    let mut chars = mount.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        let octal: String = chars.clone().take(3).collect();
-        match u8::from_str_radix(&octal, 8) {
-            Ok(byte) if octal.len() == 3 => {
-                out.push(byte as char);
-                chars.nth(2);
-            }
-            _ => out.push(c),
-        }
-    }
-    out
 }
 
 /// Returns (total_bytes, free_bytes) for the filesystem at `path`. Free space
@@ -138,27 +115,31 @@ fn statvfs(path: &str) -> io::Result<(f64, f64)> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::collections::HashMap;
 
-    const FIXTURE: &str = "\
-proc /proc proc rw,nosuid 0 0
-/dev/nvme0n1p2 / ext4 rw,relatime 0 0
-/dev/nvme0n1p2 /home ext4 rw,relatime 0 0
-/dev/sda1 /mnt/backup\\040drive xfs rw 0 0
-tmpfs /tmp tmpfs rw 0 0
-10.0.0.5:/export /mnt/nfs nfs4 rw 0 0
-";
-
-    #[test]
-    fn selects_allowlisted_mounts_deduped_by_device() {
-        // /home shares the device with / (first wins); tmpfs and nfs excluded.
-        assert_eq!(select_mounts(FIXTURE), vec!["/", "/mnt/backup drive"]);
+    fn entry(device: &str, mount: &str, fstype: &str) -> MountEntry {
+        MountEntry {
+            fs_spec: device.to_string(),
+            fs_file: mount.to_string(),
+            fs_vfstype: fstype.to_string(),
+            fs_mntops: HashMap::new(),
+            fs_freq: 0,
+            fs_passno: 0,
+        }
     }
 
     #[test]
-    fn unescapes_octal_sequences() {
-        assert_eq!(unescape_mount("/mnt/a\\040b"), "/mnt/a b");
-        assert_eq!(unescape_mount("/plain"), "/plain");
-        assert_eq!(unescape_mount("/trailing\\"), "/trailing\\");
+    fn selects_allowlisted_mounts_deduped_by_device() {
+        let entries = [
+            entry("proc", "/proc", "proc"),
+            entry("/dev/nvme0n1p2", "/", "ext4"),
+            // Shares the device with / (first wins).
+            entry("/dev/nvme0n1p2", "/home", "ext4"),
+            entry("/dev/sda1", "/mnt/backup drive", "xfs"),
+            entry("tmpfs", "/tmp", "tmpfs"),
+            entry("10.0.0.5:/export", "/mnt/nfs", "nfs4"),
+        ];
+        assert_eq!(select_mounts(&entries), vec!["/", "/mnt/backup drive"]);
     }
 
     #[test]

@@ -6,8 +6,9 @@ use silph_core::CollectConfig;
 pub struct Config {
     #[serde(default = "default_listen")]
     pub listen: String,
-    /// Bearer token the server must present when scraping.
-    pub token: String,
+    /// Bearer token the server must present when scraping. Omit to serve
+    /// `/metrics` unauthenticated.
+    pub token: Option<String>,
     #[serde(default)]
     pub disk: DiskConfig,
 }

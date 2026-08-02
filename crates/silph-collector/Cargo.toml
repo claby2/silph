@@ -10,6 +10,7 @@ description = "silph metrics collector daemon"
 silph-core = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
+clap = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true, features = ["rt", "net", "macros", "signal"] }
 tracing = { workspace = true }

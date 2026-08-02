@@ -43,7 +43,7 @@ fn default_scrape_timeout() -> Duration {
 }
 
 fn default_retention() -> Duration {
-    Duration::from_secs(30 * 24 * 3600)
+    Duration::from_hours(30 * 24)
 }
 
 #[cfg(test)]
