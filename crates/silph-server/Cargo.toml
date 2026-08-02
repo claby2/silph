@@ -20,10 +20,13 @@ humantime-serde = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "signal", "time"] }
 reqwest = { workspace = true }
-tsink = { workspace = true }
+rusqlite = { workspace = true }
+tsz = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 silph-collector = { path = "../silph-collector" }
 tempfile = { workspace = true }
+# hooks: commit-abort injection in storage tests only; prod builds stay hooks-free.
+rusqlite = { workspace = true, features = ["hooks"] }

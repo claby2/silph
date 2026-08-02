@@ -35,6 +35,8 @@
             rust-analyzer
             clippy
             rustfmt
+            pkg-config
+            sqlite
           ];
         };
       });

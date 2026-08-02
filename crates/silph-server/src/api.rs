@@ -155,8 +155,8 @@ async fn query(
         }
     };
 
-    // Bucket timestamps aligned to epoch multiples of step, matching tsink's
-    // default downsample bucket origin, so all series share one time axis.
+    // Bucket timestamps aligned to epoch multiples of step, matching the
+    // storage downsample bucket origin, so all series share one time axis.
     let t0 = params.start - params.start.rem_euclid(params.step);
     let t: Vec<i64> = (0..)
         .map(|i| t0 + i * params.step)

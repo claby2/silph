@@ -1,4 +1,9 @@
-{ lib, rustPlatform }:
+{
+  lib,
+  rustPlatform,
+  pkg-config,
+  sqlite,
+}:
 
 rustPlatform.buildRustPackage {
   pname = "silph";
@@ -15,6 +20,8 @@ rustPlatform.buildRustPackage {
     ];
   };
   cargoLock.lockFile = ../Cargo.lock;
+  nativeBuildInputs = [ pkg-config ];
+  buildInputs = [ sqlite ];
   meta = {
     description = "Lightweight server monitoring stack";
     license = lib.licenses.mit;

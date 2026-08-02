@@ -20,8 +20,10 @@ clap = { version = "4", features = ["derive"] }
 procfs = { version = "0.17", default-features = false }
 humantime-serde = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
-# Pinned exactly: pre-1.0 API churn (see README design notes).
-tsink = "=0.10.2"
+rusqlite = "0.40"
+# Exact pin: tsz's bit format is an on-disk contract for chunk blobs
+# (see the chunk_format_is_stable test in silph-server's storage.rs).
+tsz = "=0.1.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"

@@ -5,7 +5,7 @@ use clap::Parser;
 use silph_server::api::AppState;
 use silph_server::config::Config;
 use silph_server::scrape;
-use silph_server::storage::Store;
+use silph_server::storage::{self, Store};
 
 #[derive(Parser)]
 #[command(version, about = "silph monitoring server")]
@@ -49,7 +49,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let runtime = tokio::runtime::Runtime::new()?;
     let result = runtime.block_on(serve(&config, store.clone(), hosts));
-    // Flush the WAL and stop background work before exiting.
+    // Stop background work (scrape + maintenance tasks) before the final WAL
+    // checkpoint; runtime drop waits out any in-flight blocking pass.
+    drop(runtime);
     store.close()?;
     result
 }
@@ -62,6 +64,7 @@ async fn serve(
     let client = reqwest::Client::builder()
         .timeout(config.scrape_timeout)
         .build()?;
+    tokio::spawn(store.maintenance()?.run(storage::MAINTENANCE_INTERVAL));
     for target in config.targets.clone() {
         tokio::spawn(scrape::scrape_loop(
             target,

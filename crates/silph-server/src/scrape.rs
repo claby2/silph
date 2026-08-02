@@ -35,8 +35,7 @@ pub type Hosts = Arc<RwLock<BTreeMap<String, HostState>>>;
 
 /// Current time in milliseconds since the Unix epoch. Signed because
 /// timestamps get subtracted (staleness checks, bucket indexing) and unsigned
-/// differences would underflow on clock skew; i64 also matches tsink's
-/// DataPoint timestamp type, so no conversion at the storage boundary.
+/// differences would underflow on clock skew.
 pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

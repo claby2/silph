@@ -1,4 +1,4 @@
-//! Scrapes a real in-process collector into a real tsink store, twice, and
+//! Scrapes a real in-process collector into a real on-disk store, twice, and
 //! checks the query API returns processed CPU data.
 
 use std::sync::Arc;
