@@ -27,6 +27,8 @@
         default = silph;
       };
 
+      formatter = forAllSystems (pkgs: pkgs.nixfmt-tree);
+
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
           packages = with pkgs; [
