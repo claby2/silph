@@ -924,8 +924,11 @@ mod tests {
                 |row| row.get(3),
             )
             .unwrap();
+        // Match the index name alone: the wording around it varies with the
+        // libsqlite3 the system provides (3.45 calls this same plan a
+        // COVERING INDEX search, 3.53 an INDEX search).
         assert!(
-            plan.contains("USING INDEX chunks_end_s"),
+            plan.contains("INDEX chunks_end_s"),
             "retention must not scan chunks, got: {plan}"
         );
     }
