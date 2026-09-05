@@ -177,7 +177,12 @@ in
           {
             listen = "0.0.0.0:9100";
             token._secret = "/run/secrets/silph-token";
-            disk.mounts = [ "/" "/home" ];
+            metrics = {
+              cpu = { };
+              memory = { };
+              disk.mounts = [ "/" "/home" ];
+              temperature = { };
+            };
           }
         '';
       };
@@ -224,9 +229,11 @@ in
         description = "silph metrics collector";
         cfg = collectorCfg;
         extraServiceConfig = {
-          # The collector reads /proc/stat, /proc/meminfo and /proc/mounts
-          # and calls statvfs() on real mounts, so /proc must stay fully
-          # visible and /home must not be masked with an empty tmpfs.
+          # The collector reads /proc/stat, /proc/meminfo, /proc/mounts and
+          # /sys/class/hwmon, and calls statvfs() on real mounts, so /proc
+          # and /sys must stay visible (ProtectKernelTunables only makes
+          # /sys read-only) and /home must not be masked with an empty
+          # tmpfs.
           ProtectHome = "read-only";
         };
       };

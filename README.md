@@ -4,7 +4,8 @@ silph is a lightweight server monitoring stack, akin to Beszel or
 Prometheus/Grafana, made of two components:
 
 - **silph-collector** runs on each monitored host and exposes a `/metrics`
-  endpoint that collects raw metrics (CPU, memory, disk) on demand.
+  endpoint that collects raw metrics (CPU, memory, disk, temperature) on
+  demand. Every metric is opt-in via the collector config.
 - **silph-server** periodically scrapes collectors, processes the raw data,
   stores it in an embedded time-series database, and serves a query API and
   an optional web dashboard.
@@ -41,8 +42,11 @@ silph-server --config server.toml
 
 See `examples/collector.toml` and `examples/server.toml` for annotated
 configs; required keys have no defaults, and `--check-config` validates a
-config without starting the daemon. The dashboard is served at the
-server's listen address; the query API lives under `/api/`.
+config without starting the daemon. The collector collects nothing by
+default: each metric is enabled by its own `[metrics.<name>]` table (`cpu`,
+`memory`, `disk`, `temperature`), which also holds that metric's options.
+The dashboard is served at the server's listen address; the query API
+lives under `/api/`.
 
 Scrapes are authenticated with a static bearer token, but transport is
 plain HTTP and the dashboard/API has no auth — bind to localhost or put a

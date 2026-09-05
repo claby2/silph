@@ -66,7 +66,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 async fn metrics(State(state): State<AppState>) -> Json<MetricsResponse> {
     let mut response = MetricsResponse::default();
-    for metric in METRICS {
+    for metric in METRICS.iter().filter(|m| state.collect_cfg.is_enabled(**m)) {
         match metric.collect(&state.collect_cfg) {
             Ok(values) => {
                 response

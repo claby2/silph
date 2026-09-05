@@ -14,3 +14,4 @@ tokio = { workspace = true, features = ["signal", "macros"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+tempfile = { workspace = true }

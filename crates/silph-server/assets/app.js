@@ -66,6 +66,11 @@ const GROUPS = [
       { name: "disk_total", capacity: true },
     ],
   },
+  {
+    title: "Temperature",
+    unit: "celsius",
+    metrics: [{ name: "temperature_celsius" }],
+  },
 ];
 
 // Stored but not charted: the Memory chart (used vs. total) already shows it.
@@ -108,6 +113,7 @@ function formatValue(value, unit) {
   if (value == null) return "--";
   if (unit === "percent") return value.toFixed(1) + "%";
   if (unit === "bytes") return fmtBytes(value, 2);
+  if (unit === "celsius") return value.toFixed(1) + " °C";
   return value.toFixed(1);
 }
 
@@ -116,6 +122,7 @@ function formatTick(value, unit) {
   if (value == null) return "";
   if (unit === "percent") return Math.round(value * 10) / 10 + "%";
   if (unit === "bytes") return fmtBytes(value, 1);
+  if (unit === "celsius") return Math.round(value) + "°";
   return String(Math.round(value * 100) / 100);
 }
 

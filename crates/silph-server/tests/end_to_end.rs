@@ -4,6 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use silph_core::{CollectConfig, METRICS};
 use silph_server::api::AppState;
 use silph_server::config::Target;
 use silph_server::scrape::{self, Hosts};
@@ -20,7 +21,11 @@ async fn serve(app: axum::Router) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scrape_store_query() {
-    let collector_url = serve(silph_collector::router(Some(TOKEN), Default::default())).await;
+    let all_metrics = CollectConfig {
+        enabled: METRICS.iter().map(|m| m.category().to_string()).collect(),
+        ..Default::default()
+    };
+    let collector_url = serve(silph_collector::router(Some(TOKEN), all_metrics)).await;
 
     let data_dir = tempfile::tempdir().unwrap();
     let store = Store::open(data_dir.path(), Duration::from_secs(3600)).unwrap();
@@ -52,6 +57,28 @@ async fn scrape_store_query() {
     assert_eq!(
         metrics_status(&client, &collector_url, Some(TOKEN)).await,
         200
+    );
+
+    // Metrics are opt-in: a collector with only memory enabled reports only
+    // memory keys.
+    let memory_only = CollectConfig {
+        enabled: ["memory".to_string()].into(),
+        ..Default::default()
+    };
+    let memory_only_url = serve(silph_collector::router(None, memory_only)).await;
+    let body: serde_json::Value = client
+        .get(format!("{memory_only_url}/metrics"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let keys: Vec<&String> = body.as_object().unwrap().keys().collect();
+    assert!(!keys.is_empty());
+    assert!(
+        keys.iter().all(|k| k.starts_with("memory_")),
+        "unexpected keys: {keys:?}"
     );
 
     // First scrape stores gauges only; the second adds CPU (needs a delta).

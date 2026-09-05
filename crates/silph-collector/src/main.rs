@@ -32,7 +32,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    let config: Config = toml::from_str(&std::fs::read_to_string(&args.config)?)?;
+    let config = Config::from_toml(&std::fs::read_to_string(&args.config)?)?;
     if args.check_config {
         return Ok(());
     }
@@ -44,7 +44,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     runtime.block_on(async {
         let listener = tokio::net::TcpListener::bind(&config.listen).await?;
-        tracing::info!(listen = %config.listen, "silph-collector listening");
+        tracing::info!(
+            listen = %config.listen,
+            metrics = ?config.metrics.enabled(),
+            "silph-collector listening"
+        );
         axum::serve(listener, app)
             .with_graceful_shutdown(silph_core::shutdown_signal())
             .await?;

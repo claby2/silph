@@ -61,10 +61,15 @@
                     settings = {
                       listen = "0.0.0.0:9100";
                       token._secret = "/run/secrets/silph-token";
-                      disk.mounts = [
-                        "/"
-                        "/home"
-                      ];
+                      metrics = {
+                        cpu = { };
+                        memory = { };
+                        disk.mounts = [
+                          "/"
+                          "/home"
+                        ];
+                        temperature = { };
+                      };
                     };
                   };
                   services.silph.server = {

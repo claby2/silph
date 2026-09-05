@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
 use crate::key::MetricKey;
@@ -59,6 +59,7 @@ pub enum Unit {
     Percent,
     Bytes,
     Count,
+    Celsius,
 }
 
 impl Unit {
@@ -67,6 +68,7 @@ impl Unit {
             Unit::Percent => "percent",
             Unit::Bytes => "bytes",
             Unit::Count => "count",
+            Unit::Celsius => "celsius",
         }
     }
 }
@@ -81,12 +83,27 @@ pub struct OutputSpec {
     pub instanced: bool,
 }
 
-/// Collector-side configuration knobs passed to `collect`.
+/// Collector-side configuration: which metrics to collect, plus per-metric
+/// knobs passed to `collect`.
 #[derive(Debug, Clone, Default)]
 pub struct CollectConfig {
+    /// Categories to collect, by [`Metric::category`]. Every metric is
+    /// opt-in: the default (empty) set collects nothing.
+    pub enabled: BTreeSet<String>,
     /// Explicit list of mount points to report disk usage for. When unset,
     /// mounts are auto-detected by filesystem type.
     pub disk_mounts: Option<Vec<String>>,
+    /// Explicit list of temperature sensors to report, by instance name
+    /// (e.g. `k10temp/Tctl`). When unset, every readable hwmon sensor is
+    /// reported.
+    pub temperature_sensors: Option<Vec<String>>,
+}
+
+impl CollectConfig {
+    /// True if `metric` should be collected.
+    pub fn is_enabled(&self, metric: &dyn Metric) -> bool {
+        self.enabled.contains(metric.category())
+    }
 }
 
 /// A metric category, defined once and shared by collector and server.

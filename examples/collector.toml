@@ -7,7 +7,26 @@ listen = "0.0.0.0:9100"
 # /metrics is served unauthenticated (like node_exporter's default).
 token = "change-me"
 
-# Optional: explicit mount points for disk metrics. When omitted, local
-# filesystems (ext4, xfs, btrfs, ...) are auto-detected from /proc/mounts.
-#[disk]
+# Metrics to collect. Every metric is opt-in: a metric is enabled by the
+# presence of its [metrics.<name>] table, even an empty one. At least one
+# must be enabled; unknown names are rejected.
+
+# CPU usage, from /proc/stat.
+[metrics.cpu]
+
+# Memory and swap usage, from /proc/meminfo.
+[metrics.memory]
+
+# Disk usage per mount point, via statvfs.
+[metrics.disk]
+# Optional: explicit mount points. When omitted, local filesystems (ext4,
+# xfs, btrfs, ...) are auto-detected from /proc/mounts.
 #mounts = ["/", "/home"]
+
+# Hardware temperatures, from /sys/class/hwmon.
+[metrics.temperature]
+# Optional: explicit sensors, named <chip>/<label> (e.g. "k10temp/Tctl",
+# "coretemp/Package id 0", "nvme/Composite"). When omitted, every readable
+# sensor is reported. Run the collector once without this and inspect
+# /metrics to see the names on a host.
+#sensors = ["k10temp/Tctl", "nvme/Composite"]

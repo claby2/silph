@@ -19,6 +19,7 @@ pub static METRICS: &[&dyn Metric] = &[
     &metrics::cpu::Cpu,
     &metrics::memory::Memory,
     &metrics::disk::Disk,
+    &metrics::temperature::Temperature,
 ];
 
 /// Resolves on SIGINT or SIGTERM. Both binaries hand this to axum's
