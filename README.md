@@ -26,6 +26,24 @@ nix develop          # dev shell with the rust toolchain
 Or plain cargo: `cargo build --release`. The dashboard is a default cargo
 feature on silph-server; build with `--no-default-features` to omit it.
 
+### Storage benchmark
+
+Storage changes are measured, not estimated. `crates/silph-server/src/storage/bench.rs`
+drives the real write path — insert, compact, retention — with a deterministic
+synthetic workload covering every stored series, and reports what actually
+landed on disk:
+
+```sh
+# Cargo runs the test from the package directory, so pass an absolute path.
+SILPH_BENCH_OUT="$PWD/crates/silph-server/benches/baseline.txt" \
+  cargo test -p silph-server --lib --release -- --ignored --nocapture storage_footprint
+```
+
+Compare `B/pt` (database bytes per stored point) across a change; it is
+independent of how long the scenario ran. The per-series table attributes
+payload to individual metrics, which is where a compression regression shows
+up. `crates/silph-server/benches/baseline.txt` holds the current numbers.
+
 ## Running
 
 On each monitored host:

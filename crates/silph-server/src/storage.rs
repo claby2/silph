@@ -966,3 +966,6 @@ mod tests {
         assert_eq!(indexes, 1, "existing databases gain the index on open");
     }
 }
+
+#[cfg(test)]
+mod bench;

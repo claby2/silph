@@ -1,0 +1,30 @@
+silph storage footprint
+
+scenario         hosts series    stored   payload        db      live      peak    B/pt   proj@ret
+single-host          1     11    190080    0.63MB    1.66MB    5.82MB    5.82MB    8.75    16.63MB
+fleet                5     75   1296000    4.42MB   11.82MB   15.99MB   15.99MB    9.12   118.17MB
+past-retention       1     11     66000    0.21MB    0.66MB    4.83MB    4.83MB   10.05     0.64MB
+dense-scrape         1     11    190080    0.61MB    1.27MB    5.46MB    5.46MB    6.66    37.97MB
+
+detail
+  single-host    amplification  2.6x (db/payload)   peak wal    4.17MB   freelist    0.00MB   chunks    781   uncompacted rows   2640   ingested    190080
+                 largest chunk  1764 B vs 1002 B max_local (4096 B pages) -> 284 overflowing
+  fleet          amplification  2.7x (db/payload)   peak wal    4.19MB   freelist    0.00MB   chunks   5325   uncompacted rows  18000   ingested   1296000
+                 largest chunk  1764 B vs 1002 B max_local (4096 B pages) -> 2130 overflowing
+  past-retention amplification  3.1x (db/payload)   peak wal    4.17MB   freelist    0.02MB   chunks    264   uncompacted rows   2640   ingested    190080
+                 largest chunk  1764 B vs 1002 B max_local (4096 B pages) -> 96 overflowing
+  dense-scrape   amplification  2.1x (db/payload)   peak wal    4.19MB   freelist    0.00MB   chunks    253   uncompacted rows   7920   ingested    190080
+                 largest chunk  5244 B vs 1002 B max_local (4096 B pages) -> 161 overflowing
+
+per-series payload (fleet)
+  metric                       points      bytes     B/pt
+  cpu_usage_percent             85200     612583     7.19
+  disk_total                   170400      59640     0.35
+  disk_used                    170400     367915     2.16
+  disk_used_percent            170400     937542     5.50
+  memory_swap_total             85200      29820     0.35
+  memory_swap_used              85200      30884     0.36
+  memory_total                  85200      29820     0.35
+  memory_used                   85200     251846     2.96
+  memory_used_percent           85200     299095     3.51
+  temperature_celsius          255600    1804304     7.06
