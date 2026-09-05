@@ -5,11 +5,14 @@
 //! with synchronous=NORMAL — an acked insert survives a process crash, but an
 //! OS crash or power loss may drop the WAL tail written since the last
 //! checkpoint. A dedicated maintenance task ([`Store::maintenance`]) compacts
-//! completed hourly windows into one tsz-encoded blob per series in `chunks`,
-//! deletes the raw rows they covered, and enforces retention with plain
-//! DELETEs. Timestamps are stored in seconds (the scrape grid is 15s; tsz
-//! assumes seconds precision) and within one second the newest write wins;
-//! the public API stays in milliseconds.
+//! completed hourly windows into tsz-encoded blobs in `chunks` — as many per
+//! series as it takes to keep each one inside a b-tree page, see
+//! [`MAX_CHUNK_BYTES`] — deletes the raw rows they covered, and enforces
+//! retention with plain DELETEs. Timestamps are stored in seconds (the scrape
+//! grid is 15s; tsz assumes seconds precision) and within one second the
+//! newest write wins; the public API stays in milliseconds. Values are rounded
+//! to [`STORED_MANTISSA_BITS`] of mantissa on the way in, which is what makes
+//! them compress; see that constant for the resolution it leaves.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -25,6 +28,76 @@ use tsz::{DataPoint, Decode, Encode, StdDecoder, StdEncoder};
 const CHUNK_WINDOW_S: i64 = 3600;
 /// How often the maintenance task compacts windows and enforces retention.
 pub const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(600);
+/// Pages of WAL that may accumulate before an automatic checkpoint folds them
+/// back into the database.
+const WAL_CHECKPOINT_PAGES: i64 = 256;
+/// Ceiling the -wal file is truncated back to after a checkpoint.
+const WAL_SIZE_LIMIT_BYTES: i64 = 1 << 20;
+
+/// Bytes SQLite keeps inside a `WITHOUT ROWID` b-tree page for one row before
+/// spilling the remainder into a chain of overflow pages: `(page_size - 12) *
+/// 64 / 255 - 23`, for the default 4 KiB page.
+const MAX_LOCAL_PAYLOAD: usize = (4096 - 12) * 64 / 255 - 23;
+/// Budget for a chunk blob alone, leaving room for the row's other columns and
+/// its record header so the whole cell still fits in the page.
+///
+/// Overflow is expensive out of proportion to how far over the line a blob is:
+/// the chain pages hold nothing else, so a blob a few hundred bytes too large
+/// can cost several kilobytes. An hour of the default 15s grid encodes to
+/// around 800 bytes, but the grid is configurable and a faster one packs
+/// proportionally more points into the same window.
+const MAX_CHUNK_BYTES: usize = MAX_LOCAL_PAYLOAD - 32;
+
+/// Mantissa bits kept when a sample is stored. Gorilla's XOR encoding emits
+/// only the bits between the leading and trailing zero runs of `value XOR
+/// previous`, so a value carrying 52 bits of mantissa noise costs a near-full
+/// 64-bit literal every sample. Almost all of that noise is manufactured by
+/// the server itself: every `*_percent` output is a ratio of two counters and
+/// `temperature_celsius` is millidegrees divided by 1000, so the low mantissa
+/// bits encode nothing a caller can observe.
+///
+/// 20 bits keeps a relative error of at most 2^-21 (~5e-7, about 6.5 significant
+/// digits). In the units silph actually stores that means:
+///
+/// - percentages resolve to better than 1e-4 of a point;
+/// - `temperature_celsius` to ~2e-5 degrees, far under hwmon's millidegree step;
+/// - `memory_used` (~4 GiB) to 4 KiB, exactly one page;
+/// - `disk_total` (~500 GB) to 256 KiB.
+///
+/// Values that are already coarse — byte counts, constants — have trailing
+/// zero mantissa bits to begin with and pass through untouched.
+const STORED_MANTISSA_BITS: u32 = 20;
+
+/// Round `value` to [`STORED_MANTISSA_BITS`] of mantissa, half-to-even.
+///
+/// This runs on the insert path rather than inside [`encode_chunk`] so that a
+/// raw sample and its compacted form are bit-identical: a query must not
+/// change its answer when a window happens to get compacted underneath it.
+fn quantize(value: f64) -> f64 {
+    // f64::MANTISSA_DIGITS counts the implicit leading bit, hence the -1.
+    const DROPPED: u32 = f64::MANTISSA_DIGITS - 1 - STORED_MANTISSA_BITS;
+    // Infinities and NaN have reserved exponents that rounding would corrupt.
+    if !value.is_finite() {
+        return value;
+    }
+    let bits = value.to_bits();
+    let half = 1u64 << (DROPPED - 1);
+    // Bias by half, less one when the kept low bit is 0, so exact ties land on
+    // an even mantissa instead of always rounding away from zero. A carry out
+    // of the mantissa lands in the exponent, which is the correct IEEE-754
+    // result everywhere except the top of the range, where it would carry into
+    // the infinity encoding and turn a finite reading into one that poisons
+    // every average it is later bucketed into.
+    let bias = half - 1 + ((bits >> DROPPED) & 1);
+    let rounded = f64::from_bits(bits.wrapping_add(bias) & (u64::MAX << DROPPED));
+    if rounded.is_finite() {
+        rounded
+    } else {
+        // Truncate instead: it only ever moves toward zero, so it cannot
+        // overflow, and it still respects the documented tolerance.
+        f64::from_bits(bits & (u64::MAX << DROPPED))
+    }
+}
 
 #[derive(Debug)]
 pub enum StoreError {
@@ -75,6 +148,13 @@ fn open_conn(db_path: &Path) -> Result<Connection> {
     let conn = Connection::open(db_path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
+    // Checkpoint every 256 pages (1 MiB) instead of the default 1000 (4 MiB),
+    // and hand the space back afterwards rather than leaving the -wal parked at
+    // its high-water mark for the life of the process. silph commits a few
+    // hundred small rows per scrape, so a 4 MiB WAL is several times the size
+    // of the database it fronts and checkpointing this often costs nothing.
+    conn.pragma_update(None, "wal_autocheckpoint", WAL_CHECKPOINT_PAGES)?;
+    conn.pragma_update(None, "journal_size_limit", WAL_SIZE_LIMIT_BYTES)?;
     // The app and maintenance connections briefly contend for the write lock;
     // wait it out instead of surfacing SQLITE_BUSY.
     conn.busy_timeout(Duration::from_secs(5))?;
@@ -279,7 +359,7 @@ impl Inner {
             tx.prepare_cached(
                 "INSERT OR REPLACE INTO samples (series_id, ts_s, value) VALUES (?1, ?2, ?3)",
             )?
-            .execute((id, ts_s, point.value))?;
+            .execute((id, ts_s, quantize(point.value)))?;
         }
         tx.commit()?;
         if !pending.is_empty() {
@@ -445,17 +525,18 @@ fn compact_window(conn: &mut Connection, series_id: i64, window: i64) -> Result<
     // busy_timeout does not retry.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let mut samples: BTreeMap<i64, f64> = BTreeMap::new();
-    // Late samples for an already-compacted window: merge, don't clobber.
-    let existing: Option<Vec<u8>> = tx
-        .prepare_cached("SELECT data FROM chunks WHERE series_id = ?1 AND start_s = ?2")?
-        .query_row((series_id, start_s), |row| row.get(0))
-        .map(Some)
-        .or_else(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => Ok(None),
-            e => Err(e),
-        })?;
-    if let Some(blob) = existing {
-        for (ts, value) in decode_chunk(&blob)? {
+    // Late samples for an already-compacted window: merge, don't clobber. A
+    // window holds however many chunks it took to keep each blob inside a
+    // page, so collect them by range rather than by an exact start.
+    let existing: Vec<Vec<u8>> = tx
+        .prepare_cached(
+            "SELECT data FROM chunks
+             WHERE series_id = ?1 AND start_s >= ?2 AND start_s < ?3",
+        )?
+        .query_map((series_id, start_s, end_s), |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for blob in &existing {
+        for (ts, value) in decode_chunk(blob)? {
             samples.insert(ts, value);
         }
     }
@@ -475,16 +556,54 @@ fn compact_window(conn: &mut Connection, series_id: i64, window: i64) -> Result<
         return Ok(());
     }
 
-    let blob = encode_chunk(start_s, &samples);
+    // Merging late samples can shift where the splits fall, so clear the
+    // window and rewrite it rather than replacing chunk by chunk and leaving
+    // orphans behind at the old boundaries.
     tx.prepare_cached(
-        "INSERT OR REPLACE INTO chunks (series_id, start_s, end_s, data)
-         VALUES (?1, ?2, ?3, ?4)",
+        "DELETE FROM chunks WHERE series_id = ?1 AND start_s >= ?2 AND start_s < ?3",
     )?
-    .execute((series_id, start_s, end_s, blob))?;
+    .execute((series_id, start_s, end_s))?;
+    for (chunk_start, chunk_end, blob) in encode_chunks(&samples) {
+        tx.prepare_cached(
+            "INSERT INTO chunks (series_id, start_s, end_s, data) VALUES (?1, ?2, ?3, ?4)",
+        )?
+        .execute((series_id, chunk_start, chunk_end, blob))?;
+    }
     tx.prepare_cached("DELETE FROM samples WHERE series_id = ?1 AND ts_s >= ?2 AND ts_s < ?3")?
         .execute((series_id, start_s, end_s))?;
     tx.commit()?;
     Ok(())
+}
+
+/// Split `samples` into as few chunks as will each stay within
+/// [`MAX_CHUNK_BYTES`], as `(start_s, end_s, blob)` triples.
+///
+/// How many points fit is not knowable in advance: it depends entirely on how
+/// well the values happen to compress, which varies by metric and by how noisy
+/// the host was. So encode, measure, and halve whatever came out too large.
+/// Re-encoding costs nothing that matters here — this runs on the maintenance
+/// task, over one window of one series.
+fn encode_chunks(samples: &BTreeMap<i64, f64>) -> Vec<(i64, i64, Vec<u8>)> {
+    let points: Vec<(i64, f64)> = samples.iter().map(|(&ts, &value)| (ts, value)).collect();
+    let mut out = Vec::new();
+    split_encode(&points, &mut out);
+    out
+}
+
+fn split_encode(points: &[(i64, f64)], out: &mut Vec<(i64, i64, Vec<u8>)>) {
+    let (Some(first), Some(last)) = (points.first(), points.last()) else {
+        return;
+    };
+    let blob = encode_chunk(first.0, &points.iter().copied().collect());
+    // A single point over budget cannot be split any further; store it and let
+    // it overflow rather than looping forever.
+    if blob.len() <= MAX_CHUNK_BYTES || points.len() == 1 {
+        out.push((first.0, last.0, blob));
+        return;
+    }
+    let (left, right) = points.split_at(points.len() / 2);
+    split_encode(left, out);
+    split_encode(right, out);
 }
 
 fn encode_chunk(start_s: i64, samples: &BTreeMap<i64, f64>) -> Vec<u8> {
@@ -906,7 +1025,169 @@ mod tests {
             .query("cpu", "web-1", None, 0, 60_000, 15_000)
             .await
             .unwrap();
-        assert_eq!(res, vec![(15_000, 4.2)]);
+        // 4.2 is not exactly representable at the stored precision; the value
+        // survives the reopen to within the documented tolerance.
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].0, 15_000);
+        assert!(
+            (res[0].1 - 4.2).abs() <= 4.2 * MAX_RELATIVE_ERROR,
+            "reopened value drifted: {}",
+            res[0].1
+        );
+    }
+
+    /// The precision contract quantize() promises: half a unit in the last
+    /// kept place, i.e. 2^-(STORED_MANTISSA_BITS + 1).
+    const MAX_RELATIVE_ERROR: f64 = 1.0 / (1u64 << (STORED_MANTISSA_BITS + 1)) as f64;
+
+    #[test]
+    fn quantize_stays_within_relative_tolerance() {
+        let cases = [
+            0.0,
+            1.0,
+            4.2,
+            -37.125,
+            99.99999,
+            1e-9,
+            f64::MIN_POSITIVE,
+            8_192_000_000.0,
+            500_107_862_016.0,
+            f64::MAX,
+        ];
+        for value in cases {
+            let q = quantize(value);
+            assert!(
+                (q - value).abs() <= value.abs() * MAX_RELATIVE_ERROR,
+                "quantize({value}) = {q} exceeds the documented tolerance"
+            );
+        }
+    }
+
+    #[test]
+    fn quantize_preserves_coarse_and_special_values() {
+        // Values that already fit in the kept mantissa bits are untouched --
+        // constants and page-granular byte counts must not drift at all.
+        for value in [
+            0.0,
+            -0.0,
+            1.0,
+            0.5,
+            -256.0,
+            2_147_483_648.0,
+            8_589_934_592.0,
+        ] {
+            assert_eq!(
+                quantize(value).to_bits(),
+                value.to_bits(),
+                "{value} drifted"
+            );
+        }
+        // Reserved exponents pass through rather than being corrupted by the
+        // rounding carry.
+        assert!(quantize(f64::NAN).is_nan());
+        assert_eq!(quantize(f64::INFINITY), f64::INFINITY);
+        assert_eq!(quantize(f64::NEG_INFINITY), f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn quantized_values_round_trip_through_a_chunk() {
+        // Quantizing on the insert path is only sound if the encoder preserves
+        // the result exactly; otherwise compaction would move values again.
+        let samples: BTreeMap<i64, f64> = [12.5, -0.25, 99.9, 36.375, 4.2, 1e11]
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (3600 + i as i64 * 15, quantize(*v)))
+            .collect();
+        let decoded = decode_chunk(&encode_chunk(3600, &samples)).unwrap();
+        assert_eq!(decoded, samples.into_iter().collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn dense_window_splits_into_page_sized_chunks() {
+        let (_dir, store) = store(Duration::from_secs(86400 * 30));
+        // A 1s grid over one window, with values chosen to compress badly, is
+        // the shape a short scrape_interval produces: far more points per
+        // window than the 15s default, and no run of repeated values to lean
+        // on. Before splitting, this was a single multi-kilobyte blob whose
+        // tail sat alone in overflow pages.
+        for i in 0..CHUNK_WINDOW_S {
+            let value = (i as f64) * 1.618_033_988_749_895 % 97.3;
+            store
+                .insert("web-1", i * 1000, vec![point("cpu", value)])
+                .await
+                .unwrap();
+        }
+        store.compact_at(2 * CHUNK_WINDOW_S).unwrap();
+
+        let inner = store.inner.lock().unwrap();
+        let blobs: Vec<usize> = inner
+            .conn
+            .prepare("SELECT LENGTH(data) FROM chunks")
+            .unwrap()
+            .query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .map(|n| n.unwrap() as usize)
+            .collect();
+        assert!(blobs.len() > 1, "dense window should split, got {blobs:?}");
+        assert!(
+            blobs.iter().all(|n| *n <= MAX_CHUNK_BYTES),
+            "chunk would spill into overflow pages: {blobs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn split_window_round_trips_and_merges_late_samples() {
+        let (_dir, store) = store(Duration::from_secs(86400 * 30));
+        let value = |i: i64| (i as f64) * 1.618_033_988_749_895 % 97.3;
+        for i in 0..CHUNK_WINDOW_S {
+            store
+                .insert("web-1", i * 1000, vec![point("cpu", value(i))])
+                .await
+                .unwrap();
+        }
+        store.compact_at(2 * CHUNK_WINDOW_S).unwrap();
+        let before = store
+            .query("cpu", "web-1", None, 0, CHUNK_WINDOW_S * 1000, 1000)
+            .await
+            .unwrap();
+        assert_eq!(before.len(), CHUNK_WINDOW_S as usize);
+
+        // A late sample lands in the middle of an already-split window: the
+        // rewrite must pick up every chunk in the window, not just the one
+        // whose start happens to match the window boundary.
+        store
+            .insert("web-1", 1_800_000, vec![point("cpu", -12.5)])
+            .await
+            .unwrap();
+        store.compact_at(2 * CHUNK_WINDOW_S).unwrap();
+
+        let after = store
+            .query("cpu", "web-1", None, 0, CHUNK_WINDOW_S * 1000, 1000)
+            .await
+            .unwrap();
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "late merge dropped or added points"
+        );
+        let expected: Vec<(i64, f64)> = before
+            .iter()
+            .map(|(ts, v)| {
+                if *ts == 1_800_000 {
+                    (*ts, -12.5)
+                } else {
+                    (*ts, *v)
+                }
+            })
+            .collect();
+        assert_eq!(after, expected);
+        // And no stale chunk survived at the old split boundaries.
+        let inner = store.inner.lock().unwrap();
+        let rows: i64 = inner
+            .conn
+            .query_row("SELECT COUNT(*) FROM samples", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "raw rows should be compacted away");
     }
 
     /// The retention pass deletes by `end_s` while the chunks primary key
