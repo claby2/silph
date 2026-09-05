@@ -2,25 +2,40 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="dark">
   <title>silph</title>
   <link rel="stylesheet" href="/assets/vendor/uplot.min.css">
   <link rel="stylesheet" href="/assets/style.css">
 </head>
 <body>
-  <header id="topbar">
-    <nav>
-      <a href="#/" id="brand">silph</a>
-      <span id="crumb"></span>
-    </nav>
-    <div id="toolbar">
-      <span id="status"></span>
-      <div id="controls"></div>
+  <div id="shell">
+    <aside id="sidebar" aria-label="hosts">
+      <div id="sidebar-head">
+        <span id="brand">silph</span>
+        <button id="sidebar-close" class="icon-button" aria-label="close host list">&#10005;</button>
+      </div>
+      <div id="host-actions">
+        <button id="select-all" class="link-button">all</button>
+        <button id="select-none" class="link-button">none</button>
+        <span id="host-summary" class="muted small"></span>
+      </div>
+      <ul id="host-list"></ul>
+      <p id="sidebar-status" class="muted small"></p>
+    </aside>
+    <div id="scrim" hidden></div>
+    <div id="content">
+      <header id="topbar">
+        <button id="menu" class="icon-button" aria-label="show host list">
+          <span class="menu-glyph">&#9776;</span><span id="menu-count"></span>
+        </button>
+        <div id="range-bar"></div>
+        <span id="status" class="muted small"></span>
+      </header>
+      <main id="view"></main>
     </div>
-  </header>
-  <main id="view"></main>
+  </div>
   <script src="/assets/vendor/uplot.iife.min.js"></script>
-  <script src="/assets/app.js"></script>
+  <script type="module" src="/assets/app.js"></script>
 </body>
 </html>

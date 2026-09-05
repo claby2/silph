@@ -93,7 +93,7 @@ async fn scrape_store_query() {
     assert!(second > first, "second scrape should add cpu_usage_percent");
 
     let api_url = serve(silph_server::router(AppState {
-        hosts,
+        hosts: hosts.clone(),
         store: store.clone(),
         scrape_interval: Duration::from_secs(15),
     }))
@@ -160,6 +160,62 @@ async fn scrape_store_query() {
     let disk_series = disk["series"].as_array().unwrap();
     assert!(!disk_series.is_empty(), "expected at least one mount");
     assert!(disk_series[0]["instance"].is_string());
+
+    // One request covers several hosts and several metrics at once: that is
+    // how the dashboard draws a whole panel for a multi-host selection.
+    let second_target = Target {
+        name: "local-2".to_string(),
+        ..target.clone()
+    };
+    scrape::scrape_once(&second_target, &hosts, &store, &client)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    scrape::scrape_once(&second_target, &hosts, &store, &client)
+        .await
+        .unwrap();
+
+    let combined: serde_json::Value = client
+        .get(format!(
+            "{api_url}/api/query?host=local,local-2&metric=cpu_usage_percent,memory_used\
+             &start={}&end={}&step=1000",
+            now - 60_000,
+            now + 60_000,
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let combined_series = combined["series"].as_array().unwrap();
+    let labels: Vec<(&str, &str)> = combined_series
+        .iter()
+        .map(|s| (s["host"].as_str().unwrap(), s["metric"].as_str().unwrap()))
+        .collect();
+    for host in ["local", "local-2"] {
+        for metric in ["cpu_usage_percent", "memory_used"] {
+            assert!(
+                labels.contains(&(host, metric)),
+                "missing {host}/{metric} in {labels:?}"
+            );
+        }
+    }
+
+    // A window with no samples in it yields no series at all, rather than a
+    // column of nulls per host.
+    let absent: serde_json::Value = client
+        .get(format!(
+            "{api_url}/api/query?host=local,local-2&metric=cpu_usage_percent\
+             &start=0&end=60000&step=1000"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(absent["series"].as_array().unwrap().is_empty());
 
     // Unknown metric and host are 404s.
     for bad in [

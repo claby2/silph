@@ -37,6 +37,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let config: Config = toml::from_str(&std::fs::read_to_string(&args.config)?)?;
+    config.validate()?;
     if args.check_config {
         return Ok(());
     }

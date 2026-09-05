@@ -29,6 +29,29 @@ pub struct Target {
     pub token: Option<String>,
 }
 
+impl Config {
+    /// Checks what the type system can't: target names must be unique (two
+    /// targets sharing a name would interleave into one series) and free of
+    /// the comma the query API uses to separate host names.
+    pub fn validate(&self) -> Result<(), String> {
+        let mut seen: Vec<&str> = Vec::new();
+        for target in &self.targets {
+            let name = target.name.as_str();
+            if name.trim().is_empty() {
+                return Err("target name must not be empty".to_string());
+            }
+            if name.contains(',') {
+                return Err(format!("target name must not contain a comma: {name:?}"));
+            }
+            if seen.contains(&name) {
+                return Err(format!("duplicate target name: {name:?}"));
+            }
+            seen.push(name);
+        }
+        Ok(())
+    }
+}
+
 fn default_scrape_interval() -> Duration {
     Duration::from_secs(15)
 }
@@ -66,6 +89,31 @@ mod tests {
         assert_eq!(config.retention, Duration::from_secs(7 * 24 * 3600));
         assert_eq!(config.targets.len(), 1);
         assert_eq!(config.targets[0].name, "web-1");
+    }
+
+    fn config_with_target_names(names: &[&str]) -> Config {
+        let targets: String = names
+            .iter()
+            .map(|name| format!("[[targets]]\nname = {name:?}\nurl = \"http://x\"\n"))
+            .collect();
+        toml::from_str(&format!(
+            "listen = \"127.0.0.1:8080\"\ndata_dir = \"/tmp/silph\"\n{targets}"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn validate_rejects_unusable_target_names() {
+        config_with_target_names(&["web-1", "web-2"])
+            .validate()
+            .unwrap();
+        // The query API splits its `host` parameter on commas.
+        let err = config_with_target_names(&["web,1"]).validate().unwrap_err();
+        assert!(err.contains("comma"), "{err}");
+        let err = config_with_target_names(&["web", "web"])
+            .validate()
+            .unwrap_err();
+        assert!(err.contains("duplicate"), "{err}");
     }
 
     #[test]

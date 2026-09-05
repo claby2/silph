@@ -1,36 +1,62 @@
 "use strict";
 
-const view = document.getElementById("view");
-const controls = document.getElementById("controls");
-const crumb = document.getElementById("crumb");
-const statusEl = document.getElementById("status");
+// The dashboard: one page, a sidebar of selectable hosts, and a grid of charts
+// showing every selected host together over one shared time window.
 
-const RANGES = [
-  { label: "1h", ms: 3600e3 },
-  { label: "6h", ms: 6 * 3600e3 },
-  { label: "24h", ms: 24 * 3600e3 },
-  { label: "7d", ms: 7 * 24 * 3600e3 },
-];
-let rangeMs = RANGES[0].ms;
+import {
+  formatAge,
+  formatClock,
+  formatDuration,
+  formatStamp,
+  fromLocalInput,
+  toLocalInput,
+} from "/assets/format.js";
+import {
+  MAX_WINDOW_MS,
+  MIN_WINDOW_MS,
+  RANGES,
+  assignHostColors,
+  commit,
+  isOwnHash,
+  hostColor,
+  isLive,
+  onChange,
+  panBy,
+  readHash,
+  seriesColor,
+  setAbsolute,
+  setHosts,
+  setRelative,
+  state,
+  timeWindow,
+  toggleHost,
+  zoomBy,
+} from "/assets/state.js";
+import {
+  applyWindow,
+  createChart,
+  destroyChart,
+  focusHost,
+  isGesturing,
+  setWindowHandler,
+} from "/assets/chart.js";
+
+const el = (id) => document.getElementById(id);
+const view = el("view");
+const hostList = el("host-list");
+const rangeBar = el("range-bar");
+const statusEl = el("status");
+const sidebar = el("sidebar");
+const scrim = el("scrim");
+
 const REFRESH_MS = 30e3;
-
-// Bumped on every route change; in-flight async work compares against it and
-// bails instead of touching a page that no longer exists.
-let epoch = 0;
-let refreshTimer = null;
-
-// One entry per chart card: { group, plot, u } where u is null until the
-// metric first has data (it is created lazily on refresh if data appears).
-let charts = [];
-
-const PALETTE = ["#5ab0f7", "#4fc26a", "#e0b25d", "#e05d5d", "#b58af7", "#5de0d3"];
-const CAPACITY_COLOR = "#8494a5";
+/** Roughly how many buckets to ask for; fewer on phones keeps touch smooth. */
+const targetBuckets = () => (window.innerWidth < 700 ? 150 : 320);
 
 // Related metrics rendered together on one chart. `capacity: true` marks a
 // "how much exists" series (drawn as a dashed reference line, no fill) as
 // opposed to "how much is in use". Instanced metrics (e.g. per mount point)
-// fan out into one series per instance, colored per instance; a capacity
-// series shares its instance's color.
+// fan out into one series per instance.
 const GROUPS = [
   {
     title: "CPU usage",
@@ -62,8 +88,8 @@ const GROUPS = [
     title: "Disk space",
     unit: "bytes",
     metrics: [
-      { name: "disk_used" },
-      { name: "disk_total", capacity: true },
+      { name: "disk_used", label: "used" },
+      { name: "disk_total", label: "total", capacity: true },
     ],
   },
   {
@@ -76,372 +102,159 @@ const GROUPS = [
 // Stored but not charted: the Memory chart (used vs. total) already shows it.
 const HIDDEN_METRICS = new Set(["memory_used_percent"]);
 
-// --- formatting ------------------------------------------------------------
+/** Server config; the query step is aligned to the scrape interval. */
+let serverConfig = { scrape_interval_ms: 15000 };
+/** Last /api/hosts response, for the sidebar. */
+let knownHosts = [];
+/** One entry per rendered panel: {group, card, plot, u, signature, state}. */
+let panels = [];
+/** Element holding the "no data for ..." footnote under the grid. */
+let gridNote = null;
+/** Bumped whenever a rebuild invalidates in-flight loads. */
+let generation = 0;
+let refreshTimer = null;
 
-const timeHM = new Intl.DateTimeFormat([], {
-  hour: "2-digit",
-  minute: "2-digit",
-  hour12: false,
-});
-const monthDay = new Intl.DateTimeFormat([], { month: "short", day: "numeric" });
-const legendTime = new Intl.DateTimeFormat([], {
-  month: "short",
-  day: "numeric",
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
-  hour12: false,
-});
-const clockTime = new Intl.DateTimeFormat([], {
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
-  hour12: false,
-});
-
-function fmtBytes(value, decimals) {
-  const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
-  let x = Math.abs(value);
-  let i = 0;
-  while (x >= 1024 && i < units.length - 1) { x /= 1024; i++; }
-  const s = x.toFixed(decimals).replace(/\.0+$/, "");
-  return (value < 0 ? "-" : "") + s + " " + units[i];
-}
-
-/** Hover-legend values: full precision. */
-function formatValue(value, unit) {
-  if (value == null) return "--";
-  if (unit === "percent") return value.toFixed(1) + "%";
-  if (unit === "bytes") return fmtBytes(value, 2);
-  if (unit === "celsius") return value.toFixed(1) + " °C";
-  return value.toFixed(1);
-}
-
-/** Axis ticks: compact. */
-function formatTick(value, unit) {
-  if (value == null) return "";
-  if (unit === "percent") return Math.round(value * 10) / 10 + "%";
-  if (unit === "bytes") return fmtBytes(value, 1);
-  if (unit === "celsius") return Math.round(value) + "°";
-  return String(Math.round(value * 100) / 100);
-}
-
-function formatAge(ms) {
-  if (ms == null) return "never";
-  const seconds = Math.round((Date.now() - ms) / 1000);
-  if (seconds < 60) return seconds + "s ago";
-  if (seconds < 3600) return Math.round(seconds / 60) + "m ago";
-  return Math.round(seconds / 3600) + "h ago";
-}
-
-// --- fetch helpers ---------------------------------------------------------
+// --- fetching --------------------------------------------------------------
 
 async function fetchJson(url) {
   const response = await fetch(url);
-  if (!response.ok) throw new Error(`${url}: ${response.status}`);
+  if (!response.ok) {
+    const detail = (await response.text()).trim();
+    throw new Error(detail || `${url}: ${response.status}`);
+  }
   return response.json();
 }
 
-function queryWindow(config) {
-  const end = Date.now();
-  const start = end - rangeMs;
+function queryStep(win) {
   // Round the step up to a multiple of the scrape interval so every bucket
   // spans at least one sample slot; otherwise empty buckets alias into
   // periodic gaps in the charts. Gaps then only mean genuinely missed scrapes.
   // scrape_interval_ms is a u128 on the wire; past Number.MAX_SAFE_INTEGER it
-  // parses imprecisely (or as Infinity), so clamp — any such interval is
+  // parses imprecisely (or as Infinity), so clamp -- any such interval is
   // effectively "huge" and the step math must stay finite.
   const interval = Math.max(
     1000,
-    Math.min(Number(config.scrape_interval_ms), Number.MAX_SAFE_INTEGER)
+    Math.min(Number(serverConfig.scrape_interval_ms), Number.MAX_SAFE_INTEGER)
   );
-  const step = Math.ceil(Math.max(1, rangeMs / 300) / interval) * interval;
-  return { start, end, step };
+  const span = win.end - win.start;
+  return Math.ceil(Math.max(1, span / targetBuckets()) / interval) * interval;
 }
 
-// --- chart plumbing --------------------------------------------------------
+/**
+ * Loads every metric of one group, for every selected host, in a single
+ * request, and flattens the response into uPlot columns plus per-series
+ * display definitions. Returns null when nothing in the group has data.
+ */
+async function loadPanelData(group, win) {
+  const params = new URLSearchParams({
+    host: state.hosts.join(","),
+    metric: group.metrics.map((m) => m.name).join(","),
+    start: String(win.start),
+    end: String(win.end),
+    step: String(queryStep(win)),
+  });
+  const result = await fetchJson("/api/query?" + params);
+  if (result.series.length === 0) return null;
 
-const chartByEl = new Map();
-const resizeObserver = new ResizeObserver((entries) => {
-  for (const entry of entries) {
-    const u = chartByEl.get(entry.target);
-    if (u) u.setSize({ width: entry.contentRect.width, height: chartHeight() });
+  const metricIndex = new Map(group.metrics.map((m, i) => [m.name, i]));
+  // Order by the user's host order, then instance, then the group's own metric
+  // order, so the legend reads the same way on every refresh.
+  const series = [...result.series].sort(
+    (a, b) =>
+      state.hosts.indexOf(a.host) - state.hosts.indexOf(b.host) ||
+      (a.instance ?? "").localeCompare(b.instance ?? "") ||
+      metricIndex.get(a.metric) - metricIndex.get(b.metric)
+  );
+  // Hue comes from the host, so a host looks the same on every chart and in
+  // every selection. Within a host, instances fan out by their rank in that
+  // host's own sorted instance list rather than by a hash of the name: two
+  // mounts like "/" and "/boot" hash to neighbouring hues and would come out
+  // the same colour.
+  const ranks = instanceRanks(series);
+  const primaries = group.metrics.filter((m) => !m.capacity);
+  const multiHost = state.hosts.length > 1;
+  const defs = series.map((s) => {
+    const metric = group.metrics[metricIndex.get(s.metric)];
+    const hostRanks = ranks.get(s.host);
+    return {
+      host: s.host,
+      label: seriesLabel(group, metric, s, multiHost),
+      color: seriesColor(
+        s.host,
+        hostRanks?.get(s.instance) ?? 0,
+        hostRanks?.size ?? 1,
+        Math.max(0, primaries.indexOf(metric))
+      ),
+      capacity: !!metric.capacity,
+    };
+  });
+  return {
+    data: [result.t.map((ms) => ms / 1000)].concat(series.map((s) => s.values)),
+    defs,
+  };
+}
+
+/** Per host, each of its instances mapped to its position in sorted order. */
+function instanceRanks(series) {
+  const byHost = new Map();
+  for (const s of series) {
+    if (s.instance == null) continue;
+    if (!byHost.has(s.host)) byHost.set(s.host, new Set());
+    byHost.get(s.host).add(s.instance);
   }
-});
-
-function chartHeight() {
-  return window.innerWidth < 640 ? 170 : 220;
+  const ranks = new Map();
+  for (const [host, instances] of byHost) {
+    ranks.set(host, new Map([...instances].sort().map((name, i) => [name, i])));
+  }
+  return ranks;
 }
 
-function teardown() {
-  clearTimeout(refreshTimer);
-  refreshTimer = null;
-  resizeObserver.disconnect();
-  chartByEl.clear();
-  for (const chart of charts) chart.u?.destroy();
-  charts = [];
-  crumb.textContent = "";
-  statusEl.textContent = "";
-  controls.replaceChildren();
+/**
+ * Legend text: host, instance and metric, but only the parts that actually
+ * distinguish this series from its neighbours on the same chart.
+ */
+function seriesLabel(group, metric, s, multiHost) {
+  const parts = [];
+  if (multiHost) parts.push(s.host);
+  if (s.instance) parts.push(s.instance);
+  if (group.metrics.length > 1 || parts.length === 0) {
+    parts.push(metric.label ?? metric.name);
+  }
+  return parts.join(" · ");
+}
+
+// --- panels ----------------------------------------------------------------
+
+function message(text, className) {
+  const p = document.createElement("p");
+  p.className = "empty " + (className ?? "");
+  p.textContent = text;
+  return p;
+}
+
+function buildPanels() {
+  for (const panel of panels) destroyChart(panel.u);
+  panels = [];
+  gridNote = null;
   view.replaceChildren();
-}
 
-/**
- * Fetches every metric in a group over one shared time window and flattens
- * the results into uPlot columns plus per-series display definitions.
- * Returns null when no member has any data.
- */
-async function loadGroupData(host, group, win) {
-  const results = await Promise.all(
-    group.metrics.map((m) =>
-      fetchJson(
-        `/api/query?host=${encodeURIComponent(host)}&metric=${m.name}` +
-          `&start=${win.start}&end=${win.end}&step=${win.step}`
-      )
-    )
-  );
-  // All queries share start/end/step, so the server returns an identical
-  // bucket axis for each; the first non-empty result's axis serves for all.
-  let t = null;
-  const defs = [];
-  const columns = [];
-  const colors = new Map();
-  const colorFor = (key) => {
-    if (!colors.has(key)) colors.set(key, PALETTE[colors.size % PALETTE.length]);
-    return colors.get(key);
-  };
-  group.metrics.forEach((metric, i) => {
-    const series = [...results[i].series].sort((a, b) =>
-      (a.instance ?? "").localeCompare(b.instance ?? "")
-    );
-    for (const s of series) {
-      t ??= results[i].t;
-      defs.push({
-        label:
-          s.instance != null
-            ? s.instance + (metric.capacity ? " total" : "")
-            : metric.label ?? metric.name,
-        color:
-          metric.capacity && s.instance == null
-            ? CAPACITY_COLOR
-            : colorFor(s.instance ?? metric.name),
-        capacity: !!metric.capacity,
-      });
-      columns.push(s.values);
-    }
-  });
-  if (t == null) return null;
-  return { data: [t.map((ms) => ms / 1000)].concat(columns), defs };
-}
-
-const gradientFill = (color) => (u) => {
-  const { top, height } = u.bbox;
-  // uPlot also calls fill accessors while building the legend, before the
-  // plot area exists; a plain color then keeps the legend marker working.
-  if (!Number.isFinite(top) || !Number.isFinite(height)) return color + "3d";
-  const grad = u.ctx.createLinearGradient(0, top, 0, top + height);
-  grad.addColorStop(0, color + "3d");
-  grad.addColorStop(1, color + "00");
-  return grad;
-};
-
-/**
- * Sizes the y axis to its widest tick label so values like "16.0 GiB" or
- * "100%" are never clipped. uPlot re-invokes this until the size converges;
- * returning the current size after the first cycle prevents oscillation.
- */
-function axisAutoSize(u, values, axisIdx, cycleNum) {
-  const axis = u.axes[axisIdx];
-  if (cycleNum > 1) return axis._size;
-  let size = axis.ticks.size + axis.gap;
-  const longest = (values ?? []).reduce((a, v) => (v.length > a.length ? v : a), "");
-  if (longest) {
-    u.ctx.font = axis.font[0];
-    // measureText works in canvas pixels; the returned size must be CSS px.
-    size += u.ctx.measureText(longest).width / devicePixelRatio;
+  if (state.hosts.length === 0) {
+    view.appendChild(message("Select a host to chart.", "muted"));
+    return;
   }
-  return Math.ceil(size);
-}
-
-function xAxisValues(u, ticks) {
-  return ticks.map((t) => {
-    const d = new Date(t * 1000);
-    // Label midnight ticks with the date so multi-day ranges stay readable.
-    return d.getHours() === 0 && d.getMinutes() === 0
-      ? monthDay.format(d)
-      : timeHM.format(d);
-  });
-}
-
-function makeChart(plot, group, payload) {
-  // Fill under the line only when a single "in use" series owns the chart;
-  // overlapping fills from several series just turn to mud.
-  const primaries = payload.defs.filter((d) => !d.capacity).length;
-  const series = [
-    {
-      label: "time",
-      value: (_, v) => (v == null ? "--" : legendTime.format(v * 1000)),
-    },
-  ].concat(
-    payload.defs.map((d) => ({
-      label: d.label,
-      stroke: d.color,
-      width: d.capacity ? 1 : 1.5,
-      dash: d.capacity ? [6, 6] : undefined,
-      fill: !d.capacity && primaries === 1 ? gradientFill(d.color) : undefined,
-      points: { show: false },
-      value: (_, v) => formatValue(v, group.unit),
-    }))
-  );
-  const axisStyle = {
-    stroke: "#8494a5",
-    grid: { stroke: "#232c36", width: 1 },
-    ticks: { stroke: "#232c36" },
-  };
-  const opts = {
-    width: plot.clientWidth,
-    height: chartHeight(),
-    // Right padding keeps the last x-axis label from being clipped at the
-    // canvas edge.
-    padding: [10, 14, 0, 4],
-    series,
-    axes: [
-      { ...axisStyle, values: xAxisValues },
-      {
-        ...axisStyle,
-        values: (_, ticks) => ticks.map((v) => formatTick(v, group.unit)),
-        size: axisAutoSize,
-        gap: 8,
-      },
-    ],
-    scales:
-      group.unit === "percent"
-        ? { y: { range: [0, 100] } }
-        : { y: { range: (_, min, max) => [0, max > 0 ? max * 1.05 : 1] } },
-    cursor: {
-      // One hover cursor shared across every chart on the page.
-      sync: { key: "silph" },
-      focus: { prox: 24 },
-      points: { size: 5 },
-    },
-    focus: { alpha: 0.4 },
-  };
-  const u = new uPlot(opts, payload.data, plot);
-  chartByEl.set(plot, u);
-  resizeObserver.observe(plot);
-  return u;
-}
-
-function setUpdated() {
-  statusEl.textContent = "updated " + clockTime.format(new Date());
-}
-
-// --- host list -------------------------------------------------------------
-
-function statusCell(host) {
-  const td = document.createElement("td");
-  const pill = document.createElement("span");
-  pill.className = "pill " + (host.up ? "up" : "down");
-  pill.textContent = host.up ? "up" : "down";
-  td.appendChild(pill);
-  if (host.error) {
-    const err = document.createElement("div");
-    err.className = "error small";
-    err.textContent = host.error;
-    td.appendChild(err);
-  }
-  return td;
-}
-
-async function renderHostList() {
-  const myEpoch = epoch;
-  const hosts = await fetchJson("/api/hosts");
-  if (myEpoch !== epoch) return;
-
-  const panel = document.createElement("div");
-  panel.className = "panel";
-  const table = document.createElement("table");
-  table.innerHTML =
-    "<thead><tr><th>host</th><th>status</th><th>last scrape</th></tr></thead>";
-  const tbody = document.createElement("tbody");
-  if (hosts.length === 0) {
-    tbody.innerHTML =
-      '<tr><td colspan="3" class="muted empty">no hosts scraped yet</td></tr>';
-  }
-  for (const host of hosts) {
-    const row = document.createElement("tr");
-    row.className = "host";
-    row.onclick = () => (location.hash = "#/host/" + encodeURIComponent(host.name));
-    const name = document.createElement("td");
-    name.className = "host-name";
-    const dot = document.createElement("span");
-    dot.className = "dot " + (host.up ? "up" : "down");
-    name.append(dot, host.name);
-    const age = document.createElement("td");
-    age.className = "muted";
-    age.textContent = formatAge(host.last_scrape_ms);
-    row.append(name, statusCell(host), age);
-    tbody.appendChild(row);
-  }
-  table.appendChild(tbody);
-  panel.appendChild(table);
-  view.replaceChildren(panel);
-  setUpdated();
-  refreshTimer = setTimeout(route, REFRESH_MS);
-}
-
-// --- per-host charts -------------------------------------------------------
-
-function renderRangePicker() {
-  const seg = document.createElement("div");
-  seg.className = "seg";
-  for (const range of RANGES) {
-    const button = document.createElement("button");
-    button.textContent = range.label;
-    button.className = range.ms === rangeMs ? "active" : "";
-    button.onclick = () => { rangeMs = range.ms; route(); };
-    seg.appendChild(button);
-  }
-  controls.appendChild(seg);
-}
-
-/** Charts for GROUPS plus a single-metric chart for anything not covered. */
-function buildGroups(metrics) {
-  const available = new Set(metrics.map((m) => m.name));
-  const known = new Set(GROUPS.flatMap((g) => g.metrics.map((m) => m.name)));
-  const groups = GROUPS.map((g) => ({
-    ...g,
-    metrics: g.metrics.filter((m) => available.has(m.name)),
-  })).filter((g) => g.metrics.length > 0);
-  for (const m of metrics) {
-    if (!known.has(m.name) && !HIDDEN_METRICS.has(m.name)) {
-      groups.push({ title: m.name, unit: m.unit, metrics: [{ name: m.name }] });
-    }
-  }
-  return groups;
-}
-
-async function renderHost(name) {
-  const myEpoch = epoch;
-  renderRangePicker();
-  crumb.textContent = "/ " + name;
-
-  const [metrics, config] = await Promise.all([
-    fetchJson("/api/metrics"),
-    fetchJson("/api/config"),
-  ]);
-  if (myEpoch !== epoch) return;
-
-  const win = queryWindow(config);
   const grid = document.createElement("div");
   grid.className = "grid";
-  view.appendChild(grid);
+  gridNote = document.createElement("p");
+  gridNote.className = "muted small grid-note";
+  view.append(grid, gridNote);
 
-  charts = buildGroups(metrics).map((group) => {
+  panels = GROUPS.filter((g) =>
+    g.metrics.some((m) => !HIDDEN_METRICS.has(m.name))
+  ).map((group) => {
     const card = document.createElement("section");
     card.className = "chart";
     const head = document.createElement("header");
-    const title = document.createElement("h3");
+    const title = document.createElement("h2");
     title.textContent = group.title;
     const unit = document.createElement("span");
     unit.className = "unit";
@@ -451,85 +264,355 @@ async function renderHost(name) {
     plot.className = "plot loading";
     card.append(head, plot);
     grid.appendChild(card);
-    return { group, plot, u: null };
-  });
-
-  await Promise.all(
-    charts.map(async (chart) => {
-      try {
-        const payload = await loadGroupData(name, chart.group, win);
-        if (myEpoch !== epoch) return;
-        chart.plot.classList.remove("loading");
-        if (!payload) {
-          chart.plot.innerHTML = '<div class="muted empty">no data</div>';
-          return;
-        }
-        chart.plot.replaceChildren();
-        chart.u = makeChart(chart.plot, chart.group, payload);
-      } catch (e) {
-        if (myEpoch !== epoch) return;
-        chart.plot.classList.remove("loading");
-        chart.plot.innerHTML = "";
-        const err = document.createElement("div");
-        err.className = "error empty";
-        err.textContent = e.message;
-        chart.plot.appendChild(err);
-      }
-    })
-  );
-  if (myEpoch !== epoch) return;
-  setUpdated();
-  refreshTimer = setTimeout(() => refreshHost(name, config), REFRESH_MS);
-}
-
-/**
- * Slides the time window forward and swaps new data into the existing charts
- * in place — no rebuild, no flicker. A chart whose series set changed (e.g. a
- * new mount point appeared) or that just got its first data is recreated.
- */
-async function refreshHost(name, config) {
-  const myEpoch = epoch;
-  const win = queryWindow(config);
-  await Promise.all(
-    charts.map(async (chart) => {
-      try {
-        const payload = await loadGroupData(name, chart.group, win);
-        if (myEpoch !== epoch || !payload) return;
-        if (chart.u && payload.data.length === chart.u.data.length) {
-          chart.u.setData(payload.data);
-        } else {
-          chart.u?.destroy();
-          chartByEl.delete(chart.plot);
-          chart.plot.classList.remove("loading");
-          chart.plot.replaceChildren();
-          chart.u = makeChart(chart.plot, chart.group, payload);
-        }
-      } catch {
-        // Keep showing the last good data; the next refresh retries.
-      }
-    })
-  );
-  if (myEpoch !== epoch) return;
-  setUpdated();
-  refreshTimer = setTimeout(() => refreshHost(name, config), REFRESH_MS);
-}
-
-// --- routing ---------------------------------------------------------------
-
-function route() {
-  epoch++;
-  teardown();
-  const match = location.hash.match(/^#\/host\/(.+)$/);
-  const render = match
-    ? renderHost(decodeURIComponent(match[1]))
-    : renderHostList();
-  render.catch((e) => {
-    const err = document.createElement("div");
-    err.className = "error empty";
-    err.textContent = e.message;
-    view.replaceChildren(err);
+    return { group, card, plot, u: null, signature: null, state: "loading" };
   });
 }
 
-window.addEventListener("hashchange", route);
-route();
+/** Moves a panel out of chart mode and into a placeholder (or hides it). */
+function setPlaceholder(panel, name, node) {
+  panel.state = name;
+  destroyChart(panel.u);
+  panel.u = null;
+  panel.signature = null;
+  panel.card.hidden = name === "empty";
+  panel.plot.classList.remove("loading");
+  panel.plot.replaceChildren(...(node ? [node] : []));
+}
+
+async function loadPanel(panel, win, gen) {
+  try {
+    const payload = await loadPanelData(panel.group, win);
+    if (gen !== generation) return;
+    if (!payload) {
+      setPlaceholder(panel, "empty");
+      return;
+    }
+    const signature = payload.defs.map((d) => d.host + d.label + d.color).join("|");
+    if (panel.u && panel.signature === signature) {
+      // Same series set: swap the numbers in place, no rebuild, no flicker.
+      panel.u.setData(payload.data);
+    } else {
+      destroyChart(panel.u);
+      panel.card.hidden = false;
+      panel.plot.classList.remove("loading");
+      panel.plot.replaceChildren();
+      panel.u = createChart(panel.plot, panel.group, payload);
+      panel.signature = signature;
+      panel.state = "chart";
+    }
+    // The x range is the requested window, not the data's extent, so every
+    // chart lines up even when one host's series stops short.
+    applyWindow(panel.u, win.start, win.end);
+  } catch (e) {
+    if (gen !== generation) return;
+    // A refresh that fails keeps the last good chart on screen; only a panel
+    // with nothing to show yet surfaces the error.
+    if (!panel.u) setPlaceholder(panel, "error", message(e.message, "error"));
+  }
+}
+
+async function refresh() {
+  clearTimeout(refreshTimer);
+  refreshTimer = null;
+  const gen = generation;
+  if (state.hosts.length === 0) {
+    renderStatus();
+    return;
+  }
+  const win = timeWindow();
+  await Promise.all(panels.map((panel) => loadPanel(panel, win, gen)));
+  if (gen !== generation) return;
+  const empty = panels.filter((p) => p.state === "empty").map((p) => p.group.title);
+  if (gridNote) {
+    gridNote.textContent = empty.length
+      ? `No data in this window for: ${empty.join(", ")}.`
+      : "";
+  }
+  renderStatus();
+  scheduleRefresh();
+}
+
+function scheduleRefresh() {
+  clearTimeout(refreshTimer);
+  // Only a live (relative) window moves on its own; a pinned window would
+  // re-fetch identical data forever.
+  if (!isLive()) return;
+  refreshTimer = setTimeout(() => {
+    // A gesture in flight owns the x scales, and a hidden tab need not fetch;
+    // in both cases wait out another interval.
+    if (isGesturing() || document.hidden) scheduleRefresh();
+    else refresh();
+  }, REFRESH_MS);
+}
+
+// --- sidebar ---------------------------------------------------------------
+
+async function loadHosts() {
+  knownHosts = await fetchJson("/api/hosts");
+  assignHostColors(knownHosts.map((h) => h.name));
+  renderHostList();
+}
+
+function renderHostList() {
+  const selected = new Set(state.hosts);
+  hostList.replaceChildren();
+  if (knownHosts.length === 0) {
+    hostList.appendChild(message("no hosts scraped yet", "muted small"));
+  }
+  for (const host of knownHosts) {
+    const item = document.createElement("li");
+    const label = document.createElement("label");
+    label.className = "host" + (selected.has(host.name) ? " selected" : "");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = selected.has(host.name);
+    box.onchange = () => {
+      toggleHost(host.name);
+      commit();
+    };
+    const swatch = document.createElement("span");
+    swatch.className = "swatch";
+    swatch.style.background = hostColor(host.name);
+    const name = document.createElement("span");
+    name.className = "host-name";
+    name.textContent = host.name;
+    const dot = document.createElement("span");
+    dot.className = "dot " + (host.up ? "up" : "down");
+    dot.title = host.up ? "up" : "down";
+    const age = document.createElement("span");
+    age.className = "muted small host-age";
+    age.textContent = formatAge(host.last_scrape_ms);
+    label.append(box, swatch, name, dot, age);
+    // Pointing at a host isolates its lines everywhere: with more hosts on one
+    // chart than colour alone can separate, this is what names a series.
+    label.onpointerenter = () => focusHost(host.name);
+    label.onpointerleave = () => focusHost(null);
+    item.appendChild(label);
+    if (host.error) {
+      const err = document.createElement("p");
+      err.className = "error small host-error";
+      err.textContent = host.error;
+      item.appendChild(err);
+    }
+    hostList.appendChild(item);
+  }
+  const up = knownHosts.filter((h) => h.up).length;
+  el("host-summary").textContent =
+    `${state.hosts.length}/${knownHosts.length} selected · ${up} up`;
+  el("menu-count").textContent = String(state.hosts.length);
+}
+
+// --- range bar -------------------------------------------------------------
+
+let customOpen = false;
+
+function renderRangeBar() {
+  rangeBar.replaceChildren();
+  // The picker hangs off the top bar, not the range bar: on a phone the range
+  // bar scrolls horizontally and would clip a popover inside it.
+  el("topbar").querySelector(".picker")?.remove();
+
+  const quick = document.createElement("div");
+  quick.className = "seg quick";
+  for (const range of RANGES) {
+    const button = document.createElement("button");
+    button.textContent = range.label;
+    button.className = isLive() && state.range.ms === range.ms ? "active" : "";
+    button.onclick = () => {
+      setRelative(range.ms);
+      commit();
+    };
+    quick.appendChild(button);
+  }
+
+  const nav = document.createElement("div");
+  nav.className = "seg nav";
+  const navButton = (glyph, title, fn) => {
+    const button = document.createElement("button");
+    button.textContent = glyph;
+    button.title = title;
+    button.setAttribute("aria-label", title);
+    button.onclick = () => {
+      fn();
+      commit();
+    };
+    nav.appendChild(button);
+  };
+  navButton("←", "pan back", () => panBy(-0.5));
+  navButton("−", "zoom out", () => zoomBy(2));
+  navButton("+", "zoom in", () => zoomBy(0.5));
+  navButton("→", "pan forward", () => panBy(0.5));
+
+  const custom = document.createElement("button");
+  custom.className = "chip" + (customOpen ? " active" : "");
+  custom.textContent = "custom";
+  custom.setAttribute("aria-expanded", String(customOpen));
+  custom.onclick = () => {
+    customOpen = !customOpen;
+    renderRangeBar();
+  };
+
+  rangeBar.append(quick, nav, custom);
+  if (!isLive()) {
+    const back = document.createElement("button");
+    back.className = "chip";
+    back.textContent = "live";
+    back.title = "keep this window width, but end it now";
+    back.onclick = () => {
+      setRelative(Math.max(MIN_WINDOW_MS, state.range.to - state.range.from));
+      commit();
+    };
+    rangeBar.appendChild(back);
+  }
+  if (customOpen) el("topbar").appendChild(customPicker());
+}
+
+function windowLabel() {
+  const win = timeWindow();
+  return `${formatStamp(win.start)} – ${formatStamp(win.end)}`;
+}
+
+function customPicker() {
+  const win = timeWindow();
+  const box = document.createElement("form");
+  box.className = "picker";
+  const field = (labelText, value) => {
+    const wrap = document.createElement("label");
+    wrap.className = "field";
+    const text = document.createElement("span");
+    text.textContent = labelText;
+    const input = document.createElement("input");
+    input.type = "datetime-local";
+    input.value = toLocalInput(value);
+    wrap.append(text, input);
+    box.appendChild(wrap);
+    return input;
+  };
+  const from = field("from", win.start);
+  const to = field("to", win.end);
+  const apply = document.createElement("button");
+  apply.type = "submit";
+  apply.className = "chip primary";
+  apply.textContent = "apply";
+  const error = document.createElement("span");
+  error.className = "error small";
+  box.append(apply, error);
+  box.onsubmit = (e) => {
+    e.preventDefault();
+    const start = fromLocalInput(from.value);
+    const end = fromLocalInput(to.value);
+    if (start == null || end == null) {
+      error.textContent = "enter both times";
+    } else if (end - start < MIN_WINDOW_MS) {
+      error.textContent = "window must be at least a minute";
+    } else if (end - start > MAX_WINDOW_MS) {
+      error.textContent = "window must be under a year";
+    } else {
+      customOpen = false;
+      setAbsolute(start, end);
+      commit();
+    }
+  };
+  return box;
+}
+
+function renderStatus() {
+  const win = timeWindow();
+  const span = formatDuration(win.end - win.start);
+  statusEl.textContent = isLive()
+    ? `${span} · updated ${formatClock(new Date())}`
+    : windowLabel();
+}
+
+// --- drawer ----------------------------------------------------------------
+
+function setDrawer(open) {
+  document.body.classList.toggle("drawer-open", open);
+  scrim.hidden = !open;
+}
+
+// --- wiring ----------------------------------------------------------------
+
+/** Host list signature, to tell a selection change from a range change. */
+let renderedHosts = null;
+
+function applyState() {
+  renderHostList();
+  renderRangeBar();
+  renderStatus();
+  const signature = state.hosts.join(" ");
+  if (signature !== renderedHosts) {
+    renderedHosts = signature;
+    generation++;
+    buildPanels();
+  }
+  refresh();
+}
+
+async function start() {
+  const hadHosts = readHash();
+  setWindowHandler((from, to) => {
+    setAbsolute(from, to);
+    // Drags and pinches would otherwise bury the previous view under dozens
+    // of history entries.
+    commit({ replace: true });
+  });
+  onChange(applyState);
+
+  el("menu").onclick = () =>
+    setDrawer(!document.body.classList.contains("drawer-open"));
+  el("sidebar-close").onclick = () => setDrawer(false);
+  scrim.onclick = () => setDrawer(false);
+  el("select-all").onclick = () => {
+    setHosts(knownHosts.map((h) => h.name));
+    commit();
+  };
+  el("select-none").onclick = () => {
+    setHosts([]);
+    commit();
+  };
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") setDrawer(false);
+  });
+  window.addEventListener("hashchange", () => {
+    // Only a real navigation (back/forward, an edited or pasted URL) is state
+    // the app has not already applied.
+    if (isOwnHash()) return;
+    readHash();
+    applyState();
+  });
+  // A tab hidden through several refresh ticks comes back stale.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && isLive() && !refreshTimer) refresh();
+  });
+
+  try {
+    const [config, hosts] = await Promise.all([
+      fetchJson("/api/config"),
+      fetchJson("/api/hosts"),
+    ]);
+    serverConfig = config;
+    knownHosts = hosts;
+    assignHostColors(knownHosts.map((h) => h.name));
+  } catch (e) {
+    view.replaceChildren(message(e.message, "error"));
+    return;
+  }
+  // Drop hosts the config no longer has: a stale link would otherwise 404
+  // every query and show nothing at all.
+  const names = new Set(knownHosts.map((h) => h.name));
+  setHosts(state.hosts.filter((name) => names.has(name)));
+  if (!hadHosts && state.hosts.length === 0) {
+    setHosts(knownHosts.map((h) => h.name));
+  }
+  el("sidebar-status").textContent = `scrape every ${formatDuration(
+    Number(serverConfig.scrape_interval_ms)
+  )}`;
+  setDrawer(false);
+  commit({ replace: true });
+  // Host status moves on its own clock: it is cheap, and stays useful with a
+  // pinned window where no chart refresh is running.
+  setInterval(() => loadHosts().catch(() => {}), REFRESH_MS);
+}
+
+start();

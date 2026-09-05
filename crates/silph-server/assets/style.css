@@ -8,9 +8,15 @@
   --accent: #5ab0f7;
   --ok: #4fc26a;
   --bad: #e05d5d;
+  --sidebar-width: 15rem;
+  --topbar-height: 3rem;
+  /* Tap targets on touch screens; the desktop layout tightens these below. */
+  --row-height: 2.75rem;
 }
 
 * { box-sizing: border-box; }
+
+html, body { height: 100%; }
 
 body {
   margin: 0;
@@ -18,56 +24,199 @@ body {
   color: var(--text);
   font: 14px/1.5 system-ui, sans-serif;
   font-variant-numeric: tabular-nums;
+  overscroll-behavior-y: none;
 }
 
-/* --- top bar --------------------------------------------------------------- */
+button, input { font: inherit; }
 
-#topbar {
+.muted { color: var(--muted); }
+.error { color: var(--bad); }
+.small { font-size: 0.78rem; }
+.empty { margin: 0; padding: 1.5rem; text-align: center; }
+
+/* --- shell ----------------------------------------------------------------- */
+
+#shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  min-height: 100%;
+}
+
+#content { min-width: 0; }
+
+#scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 5;
+  background: #0009;
+}
+
+/* --- sidebar --------------------------------------------------------------- */
+
+#sidebar {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 0.5rem 1rem;
-  padding: 0.6rem 1rem;
-  border-bottom: 1px solid var(--border);
+  flex-direction: column;
+  gap: 0.5rem;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  height: 100dvh;
+  padding: 0.6rem 0.5rem 0.75rem;
+  border-right: 1px solid var(--border);
   background: var(--panel);
 }
 
-#topbar nav {
+#sidebar-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
+  justify-content: space-between;
   gap: 0.5rem;
-  min-width: 0;
+  padding: 0 0.4rem;
+  min-height: calc(var(--topbar-height) - 1.2rem);
 }
 
 #brand {
   color: var(--accent);
   font-weight: 700;
   font-size: 1.1rem;
-  text-decoration: none;
+  letter-spacing: 0.01em;
 }
 
-#crumb {
-  color: var(--muted);
+#sidebar-close { display: none; }
+
+#host-actions {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0 0.4rem;
+}
+
+.link-button {
+  background: none;
+  border: 0;
+  padding: 0.15rem 0;
+  color: var(--accent);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.link-button:hover { text-decoration: underline; }
+
+#host-summary { margin-left: auto; }
+
+#host-list {
+  flex: 1;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.host {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: var(--row-height);
+  padding: 0.25rem 0.4rem;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.host:hover { background: var(--panel-2); }
+.host.selected { background: var(--panel-2); }
+
+.host input[type="checkbox"] {
+  flex: none;
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.swatch {
+  flex: none;
+  width: 0.55rem;
+  height: 1.1rem;
+  border-radius: 3px;
+  opacity: 0.35;
+}
+.host.selected .swatch { opacity: 1; }
+
+.host-name {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-#toolbar {
+.host-age { flex: none; }
+
+.host-error {
+  margin: 0 0 0.35rem;
+  padding: 0 0.4rem 0 2.05rem;
+  overflow-wrap: anywhere;
+}
+
+.dot {
+  flex: none;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+}
+.dot.up { background: var(--ok); }
+.dot.down { background: var(--bad); }
+
+#sidebar-status { margin: 0; padding: 0 0.4rem; }
+
+/* --- top bar --------------------------------------------------------------- */
+
+#topbar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
   display: flex;
   align-items: center;
   gap: 0.75rem;
+  min-height: var(--topbar-height);
+  padding: 0.4rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  backdrop-filter: blur(8px);
 }
 
-#status {
-  color: var(--muted);
-  font-size: 0.8rem;
+.icon-button {
+  display: none;
+  align-items: center;
+  /* The box is sized by the tap target, not by the glyph, so the glyph has to
+     be centred in it explicitly on both axes. */
+  justify-content: center;
+  gap: 0.3rem;
+  min-width: var(--row-height);
+  min-height: var(--row-height);
+  padding: 0 0.5rem;
+  line-height: 1;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
 }
 
-/* Segmented range picker */
+.menu-glyph { font-size: 1.05rem; line-height: 1; }
+#menu-count { color: var(--accent); font-size: 0.8rem; font-weight: 600; }
+
+#status { margin-left: auto; white-space: nowrap; }
+
+#range-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
 .seg {
   display: inline-flex;
+  flex: none;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -77,11 +226,11 @@ body {
   background: none;
   border: 0;
   color: var(--muted);
-  font: inherit;
   font-size: 0.85rem;
-  padding: 0.25rem 0.65rem;
+  padding: 0.25rem 0.6rem;
   border-radius: 6px;
   cursor: pointer;
+  white-space: nowrap;
 }
 .seg button:hover { color: var(--text); }
 .seg button.active {
@@ -89,11 +238,58 @@ body {
   color: var(--accent);
   box-shadow: inset 0 0 0 1px var(--border);
 }
+.seg.nav button { min-width: 1.9rem; padding: 0.25rem 0.4rem; }
 
-/* --- layout ---------------------------------------------------------------- */
+.chip {
+  flex: none;
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 0.85rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chip:hover { color: var(--text); }
+.chip.active { color: var(--accent); background: var(--panel-2); }
+.chip.primary { color: var(--accent); }
+
+/* Custom-window popover, anchored under the range bar. */
+.picker {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  left: 0;
+  z-index: 4;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.5rem;
+  max-width: min(30rem, calc(100vw - 1.5rem));
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-2);
+  box-shadow: 0 12px 28px #0008;
+}
+
+.field { display: flex; flex-direction: column; gap: 0.2rem; }
+.field span { color: var(--muted); font-size: 0.75rem; }
+.field input {
+  min-height: var(--row-height);
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  color-scheme: dark;
+}
+
+/* --- chart grid ------------------------------------------------------------ */
 
 main {
-  max-width: 1200px;
+  position: relative;
+  max-width: 1400px;
   margin: 0 auto;
   padding: 1rem;
 }
@@ -101,70 +297,10 @@ main {
 .grid {
   display: grid;
   gap: 1rem;
-  grid-template-columns: repeat(auto-fit, minmax(min(30rem, 100%), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(28rem, 100%), 1fr));
 }
 
-.panel {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  overflow: hidden;
-}
-
-/* --- host list ------------------------------------------------------------- */
-
-/* Scoped to the host-list panel: uPlot's legend is also a <table>. */
-.panel table {
-  width: 100%;
-  border-collapse: collapse;
-}
-
-.panel th, .panel td {
-  text-align: left;
-  padding: 0.55rem 0.9rem;
-  border-bottom: 1px solid var(--border);
-}
-
-.panel th {
-  color: var(--muted);
-  font-weight: 600;
-  font-size: 0.72rem;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-
-.panel tbody tr:last-child td { border-bottom: none; }
-
-tr.host { cursor: pointer; }
-tr.host:hover { background: var(--panel-2); }
-.host-name { font-weight: 600; }
-
-.dot {
-  display: inline-block;
-  width: 0.55rem;
-  height: 0.55rem;
-  border-radius: 50%;
-  margin-right: 0.55rem;
-}
-.dot.up { background: var(--ok); }
-.dot.down { background: var(--bad); }
-
-.pill {
-  display: inline-block;
-  padding: 0.1rem 0.55rem;
-  border-radius: 999px;
-  font-size: 0.78rem;
-  font-weight: 600;
-}
-.pill.up { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
-.pill.down { color: var(--bad); background: color-mix(in srgb, var(--bad) 14%, transparent); }
-
-.error { color: var(--bad); }
-.muted { color: var(--muted); }
-.small { font-size: 0.78rem; }
-.empty { padding: 1.5rem; text-align: center; }
-
-/* --- chart cards ------------------------------------------------------------ */
+.grid-note { margin: 1rem 0 0; }
 
 .chart {
   background: var(--panel);
@@ -182,7 +318,7 @@ tr.host:hover { background: var(--panel-2); }
   margin-bottom: 0.6rem;
 }
 
-.chart h3 {
+.chart h2 {
   margin: 0;
   font-size: 0.92rem;
   font-weight: 600;
@@ -193,7 +329,7 @@ tr.host:hover { background: var(--panel-2); }
   font-size: 0.75rem;
 }
 
-.plot { min-height: 244px; }
+.plot { min-height: 248px; }
 
 .plot.loading {
   border-radius: 6px;
@@ -205,25 +341,45 @@ tr.host:hover { background: var(--panel-2); }
   to { background-position: -200% 0; }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .plot.loading { animation: none; }
+}
+
 .plot .empty { padding-top: 5rem; }
 
 /* --- uPlot dark-theme adjustments ------------------------------------------ */
 
 .uplot { font-family: inherit; }
 
+/*
+ * The legend is a <table>; laying its rows out as wrapping inline blocks keeps
+ * an aggregate chart's dozen host series to two or three lines instead of a
+ * dozen, which matters most on a phone.
+ */
 .uplot .u-legend {
+  display: block;
   font-size: 11px;
   color: var(--muted);
   text-align: left;
-  margin-top: 2px;
+  margin-top: 4px;
+}
+.uplot .u-legend tbody { display: block; }
+.uplot .u-legend tr.u-series {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3rem;
+  margin: 0 0.75rem 0.15rem 0;
 }
 .uplot .u-legend th { font-weight: 500; padding: 0; }
+.uplot .u-legend th::after { content: none; }
 .uplot .u-legend .u-marker {
   width: 9px;
   height: 9px;
   border-radius: 2px;
 }
 .uplot .u-legend .u-value {
+  display: inline-block;
+  padding: 0;
   color: var(--text);
   font-variant-numeric: tabular-nums;
 }
@@ -232,14 +388,77 @@ tr.host:hover { background: var(--panel-2); }
 
 .uplot .u-select { background: color-mix(in srgb, var(--accent) 12%, transparent); }
 
-/* --- small screens ---------------------------------------------------------- */
+/*
+ * Vertical page scrolling stays with the browser; horizontal drags and
+ * two-finger pinches reach the gesture handlers in chart.js instead.
+ */
+.uplot .u-over { touch-action: pan-y; }
 
-@media (max-width: 640px) {
-  #topbar { padding: 0.5rem 0.75rem; }
-  #status { display: none; }
-  main { padding: 0.75rem; }
-  .panel th, .panel td { padding: 0.45rem 0.6rem; }
-  .chart { padding: 0.6rem 0.7rem 0.45rem; }
-  .plot { min-height: 194px; }
+/* --- narrow screens --------------------------------------------------------- */
+
+@media (min-width: 900px) {
+  :root { --row-height: 2.1rem; }
+  #scrim { display: none; }
+}
+
+@media (max-width: 899px) {
+  #shell { grid-template-columns: minmax(0, 1fr); }
+
+  #sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 6;
+    width: min(var(--sidebar-width), 82vw);
+    transform: translateX(-101%);
+    transition: transform 0.18s ease-out;
+    box-shadow: 0 0 32px #0009;
+  }
+  .drawer-open #sidebar { transform: none; }
+
+  #sidebar-close { display: inline-flex; }
+  .icon-button { display: inline-flex; }
+
+  /* The drawer covers the page; freezing the body stops it scrolling behind. */
+  .drawer-open { overflow: hidden; }
+
+  #topbar {
+    flex-wrap: wrap;
+    padding: 0.4rem 0.6rem;
+    row-gap: 0.4rem;
+  }
+  #status {
+    order: 3;
+    width: 100%;
+    margin-left: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #range-bar {
+    order: 2;
+    flex: 1;
+    /* Quick ranges plus the nav buttons overflow a phone; scroll them rather
+       than shrinking the tap targets. */
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+  #range-bar::-webkit-scrollbar { display: none; }
+
+  .seg button { padding: 0.35rem 0.65rem; }
+  .seg.nav button { min-width: 2.2rem; }
+  .chip { padding: 0.4rem 0.7rem; }
+
+  .picker { left: 0.6rem; right: 0.6rem; max-width: none; }
+  .field { flex: 1 1 10rem; }
+
+  main { padding: 0.6rem; }
+  .grid { gap: 0.6rem; }
+  .chart { padding: 0.6rem 0.6rem 0.45rem; border-radius: 8px; }
+  .plot { min-height: 210px; }
   .plot .empty { padding-top: 3.5rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #sidebar { transition: none; }
 }

@@ -13,6 +13,9 @@ use crate::storage::Store;
 
 /// Refuse queries that would produce absurd numbers of buckets.
 const MAX_BUCKETS: i64 = 100_000;
+/// Refuse queries whose host x metric x instance fan-out would swamp the
+/// storage layer (and any chart drawing the result).
+const MAX_SERIES: usize = 512;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -91,7 +94,10 @@ async fn metrics() -> Json<Vec<MetricInfo>> {
 
 #[derive(Debug, Deserialize)]
 struct QueryParams {
+    /// One or more host names, comma separated. Config validation rejects
+    /// commas in target names so the split is unambiguous.
     host: String,
+    /// One or more metric names, comma separated.
     metric: String,
     /// Milliseconds since the Unix epoch.
     start: i64,
@@ -109,51 +115,92 @@ struct QueryResponse {
 
 #[derive(Debug, Serialize)]
 struct Series {
+    metric: &'static str,
+    host: String,
     /// Null for plain metrics; the instance (e.g. mount point) otherwise.
     instance: Option<String>,
     /// One entry per bucket; null where no data.
     values: Vec<Option<f64>>,
 }
 
+/// Splits a comma-separated parameter, trimming blanks and dropping repeats
+/// while preserving the caller's order.
+fn split_list(raw: &str) -> Vec<&str> {
+    let mut out: Vec<&str> = Vec::new();
+    for item in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if !out.contains(&item) {
+            out.push(item);
+        }
+    }
+    out
+}
+
+/// Range query for any combination of hosts and metrics over one shared time
+/// axis. The dashboard draws a whole chart (several metrics across every
+/// selected host) from a single call, so one panel is one request no matter
+/// how many hosts are selected.
 async fn query(
     State(state): State<AppState>,
     Query(params): Query<QueryParams>,
 ) -> Result<Json<QueryResponse>, (StatusCode, String)> {
-    let bad_request = |msg: &str| (StatusCode::BAD_REQUEST, msg.to_string());
-    let spec: &OutputSpec = METRICS
-        .iter()
-        .flat_map(|m| m.outputs())
-        .find(|spec| spec.name == params.metric)
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            format!("unknown metric: {}", params.metric),
-        ))?;
+    let bad_request = |msg: String| (StatusCode::BAD_REQUEST, msg);
+    let not_found = |msg: String| (StatusCode::NOT_FOUND, msg);
+
+    let specs: Vec<&OutputSpec> = split_list(&params.metric)
+        .into_iter()
+        .map(|name| {
+            METRICS
+                .iter()
+                .flat_map(|m| m.outputs())
+                .find(|spec| spec.name == name)
+                .ok_or_else(|| not_found(format!("unknown metric: {name}")))
+        })
+        .collect::<Result<_, _>>()?;
+    if specs.is_empty() {
+        return Err(bad_request("metric must name at least one metric".into()));
+    }
+    let host_names = split_list(&params.host);
+    if host_names.is_empty() {
+        return Err(bad_request("host must name at least one host".into()));
+    }
     if params.step <= 0 {
-        return Err(bad_request("step must be positive"));
+        return Err(bad_request("step must be positive".into()));
     }
     if params.end <= params.start {
-        return Err(bad_request("end must be after start"));
+        return Err(bad_request("end must be after start".into()));
     }
     if (params.end - params.start) / params.step > MAX_BUCKETS {
-        return Err(bad_request("too many buckets; increase step"));
+        return Err(bad_request("too many buckets; increase step".into()));
     }
 
-    // Instanced metrics fan out into one series per known instance.
-    let instances: Vec<Option<String>> = {
+    // Resolve the full (metric, host, instance) fan-out up front, under one
+    // lock, so the storage queries below need no access to host state.
+    let targets: Vec<(&'static str, String, Option<String>)> = {
         let hosts = state.hosts.read().unwrap();
-        let host = hosts.get(&params.host).ok_or((
-            StatusCode::NOT_FOUND,
-            format!("unknown host: {}", params.host),
-        ))?;
-        if spec.instanced {
-            host.instances
-                .get(params.metric.as_str())
-                .map(|set| set.iter().cloned().map(Some).collect())
-                .unwrap_or_default()
-        } else {
-            vec![None]
+        let mut targets = Vec::new();
+        for name in &host_names {
+            let host = hosts
+                .get(*name)
+                .ok_or_else(|| not_found(format!("unknown host: {name}")))?;
+            for spec in &specs {
+                if spec.instanced {
+                    let instances = host.instances.get(spec.name);
+                    for instance in instances.into_iter().flatten() {
+                        targets.push((spec.name, name.to_string(), Some(instance.clone())));
+                    }
+                } else {
+                    targets.push((spec.name, name.to_string(), None));
+                }
+            }
         }
+        targets
     };
+    if targets.len() > MAX_SERIES {
+        return Err(bad_request(format!(
+            "query fans out into {} series; select fewer hosts or metrics",
+            targets.len()
+        )));
+    }
 
     // Bucket timestamps aligned to epoch multiples of step, matching the
     // storage downsample bucket origin, so all series share one time axis.
@@ -163,13 +210,13 @@ async fn query(
         .take_while(|ts| *ts < params.end)
         .collect();
 
-    let mut series = Vec::with_capacity(instances.len());
-    for instance in instances {
+    let mut series = Vec::with_capacity(targets.len());
+    for (metric, host, instance) in targets {
         let points = state
             .store
             .query(
-                &params.metric,
-                &params.host,
+                metric,
+                &host,
                 instance.as_deref(),
                 params.start,
                 params.end,
@@ -177,6 +224,12 @@ async fn query(
             )
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("query: {e}")))?;
+        // A series with nothing in the window is omitted rather than sent as
+        // a column of nulls: with several hosts selected those would pile up
+        // as empty legend entries for metrics a host doesn't even collect.
+        if points.is_empty() {
+            continue;
+        }
         let mut values: Vec<Option<f64>> = vec![None; t.len()];
         for (ts, value) in points {
             let index = (ts - t0) / params.step;
@@ -184,7 +237,12 @@ async fn query(
                 values[index as usize] = Some(value);
             }
         }
-        series.push(Series { instance, values });
+        series.push(Series {
+            metric,
+            host,
+            instance,
+            values,
+        });
     }
     Ok(Json(QueryResponse { t, series }))
 }
