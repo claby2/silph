@@ -1,19 +1,26 @@
-//! CPU usage, from the aggregate line of `/proc/stat` via procfs.
+//! CPU usage, from the aggregate `cpu` line of `/proc/stat`.
 //!
 //! The collector reports raw jiffy counters; the server computes a busy
 //! percentage from the delta between consecutive scrapes, so no wall-clock or
 //! core count is needed.
+//!
+//! The line is parsed directly rather than through procfs, whose `KernelStats`
+//! allocates a `CpuTime` per core (plus `ctxt`, `btime`, ...) on every scrape
+//! when only the aggregate is ever used.
 
-use std::io;
-
-use procfs::prelude::*;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader};
 
 use crate::key::MetricKey;
 use crate::metric::{CollectConfig, Metric, OutputSpec, Point, RawSnapshot, Unit};
 
-/// All reported wire fields. Fields absent on older kernels (e.g. `steal`
-/// before 2.6.11) are simply not reported. `guest`/`guest_nice` are excluded:
-/// the kernel already accounts guest time inside `user`/`nice`.
+const PROC_STAT: &str = "/proc/stat";
+
+/// All reported wire fields, in the order `/proc/stat` lists them. Fields
+/// absent on older kernels (e.g. `steal` before 2.6.11) are simply not
+/// reported. `guest`/`guest_nice` follow `steal` on the line and are excluded
+/// by stopping here: the kernel already accounts guest time inside
+/// `user`/`nice`.
 const FIELDS: [&str; 8] = [
     "cpu_user",
     "cpu_nice",
@@ -24,6 +31,10 @@ const FIELDS: [&str; 8] = [
     "cpu_softirq",
     "cpu_steal",
 ];
+
+/// The fields that must be present for the line to be usable at all; `process`
+/// needs idle and a total to divide by.
+const REQUIRED_FIELDS: usize = 4;
 
 const IDLE_FIELDS: [&str; 2] = ["cpu_idle", "cpu_iowait"];
 
@@ -43,26 +54,11 @@ impl Metric for Cpu {
     }
 
     fn collect(&self, _cfg: &CollectConfig) -> io::Result<Vec<(MetricKey, f64)>> {
-        let cpu = procfs::KernelStats::current()
-            .map_err(io::Error::other)?
-            .total;
-        let mut out = vec![
-            (MetricKey::new("cpu_user"), cpu.user as f64),
-            (MetricKey::new("cpu_nice"), cpu.nice as f64),
-            (MetricKey::new("cpu_system"), cpu.system as f64),
-            (MetricKey::new("cpu_idle"), cpu.idle as f64),
-        ];
-        for (name, value) in [
-            ("cpu_iowait", cpu.iowait),
-            ("cpu_irq", cpu.irq),
-            ("cpu_softirq", cpu.softirq),
-            ("cpu_steal", cpu.steal),
-        ] {
-            if let Some(value) = value {
-                out.push((MetricKey::new(name), value as f64));
-            }
-        }
-        Ok(out)
+        // The aggregate is the first line, so one buffered read reaches it
+        // without paying to parse the per-core lines behind it.
+        let mut line = String::new();
+        BufReader::new(File::open(PROC_STAT)?).read_line(&mut line)?;
+        parse_total_line(&line)
     }
 
     fn process(&self, prev: Option<&RawSnapshot>, curr: &RawSnapshot) -> Vec<Point> {
@@ -82,6 +78,33 @@ impl Metric for Cpu {
             busy_delta / total_delta * 100.0,
         )]
     }
+}
+
+/// Parses the aggregate `cpu` line into wire fields in [`FIELDS`] order.
+/// Trailing counters the kernel doesn't emit are left out, matching the
+/// tolerance the flat wire format already has for missing keys.
+fn parse_total_line(line: &str) -> io::Result<Vec<(MetricKey, f64)>> {
+    let invalid = |msg: String| io::Error::new(io::ErrorKind::InvalidData, msg);
+    let mut tokens = line.split_ascii_whitespace();
+    if tokens.next() != Some("cpu") {
+        return Err(invalid(format!(
+            "{PROC_STAT}: expected the aggregate `cpu` line first"
+        )));
+    }
+    let mut out = Vec::with_capacity(FIELDS.len());
+    for (name, token) in FIELDS.iter().zip(tokens) {
+        let value: u64 = token
+            .parse()
+            .map_err(|_| invalid(format!("{PROC_STAT}: {name} is not a counter: {token:?}")))?;
+        out.push((MetricKey::new(*name), value as f64));
+    }
+    if out.len() < REQUIRED_FIELDS {
+        return Err(invalid(format!(
+            "{PROC_STAT}: aggregate cpu line has {} fields, need {REQUIRED_FIELDS}",
+            out.len()
+        )));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -138,5 +161,35 @@ mod tests {
         let prev = snapshot(&[("cpu_user", 5000.0), ("cpu_idle", 5000.0)]);
         let curr = snapshot(&[("cpu_user", 10.0), ("cpu_idle", 90.0)]);
         assert!(Cpu.process(Some(&prev), &curr).is_empty());
+    }
+
+    #[test]
+    fn parses_full_line_and_stops_before_guest() {
+        // A modern kernel emits 10 counters; the last two are guest/guest_nice.
+        let line = "cpu  100 20 30 900 5 1 2 3 40 4\n";
+        let values = parse_total_line(line).unwrap();
+        assert_eq!(
+            values,
+            FIELDS
+                .iter()
+                .zip([100.0, 20.0, 30.0, 900.0, 5.0, 1.0, 2.0, 3.0])
+                .map(|(name, v)| (MetricKey::new(*name), v))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn omits_trailing_fields_an_old_kernel_does_not_emit() {
+        let values = parse_total_line("cpu 100 20 30 900").unwrap();
+        assert_eq!(values.len(), 4);
+        assert_eq!(values[3], (MetricKey::new("cpu_idle"), 900.0));
+    }
+
+    #[test]
+    fn rejects_lines_that_are_not_a_usable_aggregate() {
+        // Per-core line, too few counters, and a non-numeric counter.
+        assert!(parse_total_line("cpu0 100 20 30 900").is_err());
+        assert!(parse_total_line("cpu 100 20 30").is_err());
+        assert!(parse_total_line("cpu 100 20 30 nine").is_err());
     }
 }

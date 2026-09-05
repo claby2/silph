@@ -63,8 +63,12 @@ pub struct Store {
 
 struct Inner {
     conn: Connection,
-    /// (metric, host, instance) -> series id, to skip the upsert per insert.
-    series_ids: HashMap<(String, String, String), i64>,
+    /// host -> metric -> instance -> series id, to skip the upsert per insert.
+    /// Nested rather than keyed by one `(String, String, String)` tuple so
+    /// that a lookup can borrow each component: a tuple key made the hot path
+    /// allocate three strings per point just to ask whether it already knew
+    /// the series.
+    series_ids: HashMap<String, HashMap<&'static str, HashMap<String, i64>>>,
 }
 
 fn open_conn(db_path: &Path) -> Result<Connection> {
@@ -102,7 +106,11 @@ impl Store {
                end_s INTEGER NOT NULL,
                data BLOB NOT NULL,
                PRIMARY KEY (series_id, start_s)
-             ) WITHOUT ROWID;",
+             ) WITHOUT ROWID;
+             -- Retention deletes by end_s, and the chunks primary key leads
+             -- with series_id; without this index every pass full-scans the
+             -- table that holds nearly all of the data.
+             CREATE INDEX IF NOT EXISTS chunks_end_s ON chunks(end_s);",
         )?;
         Ok(Store {
             inner: Arc::new(Mutex::new(Inner {
@@ -125,9 +133,19 @@ impl Store {
 
     /// Insert one host's processed points at the given scrape timestamp.
     /// Series are labeled `host`, plus `instance` for per-resource metrics.
-    pub async fn insert(&self, host: &str, ts_ms: i64, points: Vec<Point>) -> Result<()> {
+    ///
+    /// Takes the points as a shared slice so a caller that still needs them
+    /// after the insert (the scrape loop reads instance labels off them) hands
+    /// over a refcount rather than a deep copy; `Vec<Point>` converts in.
+    pub async fn insert(
+        &self,
+        host: &str,
+        ts_ms: i64,
+        points: impl Into<Arc<[Point]>>,
+    ) -> Result<()> {
         let inner = self.inner.clone();
         let host = host.to_string();
+        let points = points.into();
         tokio::task::spawn_blocking(move || inner.lock().unwrap().insert(&host, ts_ms, &points))
             .await
             .expect("storage insert task panicked")
@@ -217,19 +235,31 @@ impl Maintenance {
 impl Inner {
     fn insert(&mut self, host: &str, ts_ms: i64, points: &[Point]) -> Result<()> {
         let ts_s = ts_ms.div_euclid(1000);
+        // Split the borrow so the cache stays readable while the transaction
+        // holds the connection.
+        let Inner { conn, series_ids } = self;
+        let cached = series_ids.get(host);
         // New series ids stay local until the commit succeeds: a rolled-back
         // transaction must not leave cache entries for rows it never created.
-        let mut pending: HashMap<(String, String, String), i64> = HashMap::new();
-        let tx = self.conn.transaction()?;
+        // The host is fixed for the call, so staging only needs the rest of the
+        // key, and past a host's first scrape this stays empty.
+        let mut pending: Vec<(&'static str, &str, i64)> = Vec::new();
+        let tx = conn.transaction()?;
         for point in points {
             let instance = point.instance.as_deref().unwrap_or("");
-            let key = (
-                point.name.to_string(),
-                host.to_string(),
-                instance.to_string(),
-            );
-            let id = match self.series_ids.get(&key).or_else(|| pending.get(&key)) {
-                Some(id) => *id,
+            // Every lookup borrows, so the steady state allocates nothing.
+            let known = cached
+                .and_then(|metrics| metrics.get(point.name))
+                .and_then(|instances| instances.get(instance))
+                .copied()
+                .or_else(|| {
+                    pending
+                        .iter()
+                        .find(|(metric, staged, _)| *metric == point.name && *staged == instance)
+                        .map(|&(_, _, id)| id)
+                });
+            let id = match known {
+                Some(id) => id,
                 None => {
                     // Two portable statements instead of RETURNING (SQLite >= 3.35),
                     // since we link whatever libsqlite3 the system provides.
@@ -242,7 +272,7 @@ impl Inner {
                             "SELECT id FROM series WHERE metric = ?1 AND host = ?2 AND instance = ?3",
                         )?
                         .query_row((point.name, host, instance), |row| row.get(0))?;
-                    pending.insert(key, id);
+                    pending.push((point.name, instance, id));
                     id
                 }
             };
@@ -252,7 +282,15 @@ impl Inner {
             .execute((id, ts_s, point.value))?;
         }
         tx.commit()?;
-        self.series_ids.extend(pending);
+        if !pending.is_empty() {
+            let metrics = series_ids.entry(host.to_string()).or_default();
+            for (metric, instance, id) in pending {
+                metrics
+                    .entry(metric)
+                    .or_default()
+                    .insert(instance.to_string(), id);
+            }
+        }
         Ok(())
     }
 
@@ -280,54 +318,91 @@ impl Inner {
         // Ceil the start so a mid-second start never admits an earlier sample.
         let start_s = (start_ms + 999).div_euclid(1000);
         let end_s = end_ms.div_euclid(1000);
-        // Keyed by timestamp so raw samples override chunk points, mirroring
-        // compact_and_prune's merge semantics.
-        let mut points: BTreeMap<i64, f64> = BTreeMap::new();
-
-        let blobs: Vec<Vec<u8>> = self
-            .conn
-            .prepare_cached(
-                "SELECT data FROM chunks
-                 WHERE series_id = ?1 AND end_s >= ?2 AND start_s <= ?3",
-            )?
-            .query_map((id, start_s, end_s), |row| row.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        for blob in blobs {
-            points.extend(
-                decode_chunk(&blob)?
-                    .into_iter()
-                    .filter(|(ts, _)| (start_s..=end_s).contains(ts)),
-            );
+        // Decoded chunk points and raw samples each arrive ascending and
+        // unique — chunk windows never overlap, and both tables are read along
+        // their primary key — so the two runs merge in one pass. Funnelling
+        // them through a dedup map instead cost a B-tree node per point.
+        let mut chunk_points: Vec<(i64, f64)> = Vec::new();
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT data FROM chunks
+             WHERE series_id = ?1 AND end_s >= ?2 AND start_s <= ?3
+             ORDER BY start_s",
+        )?;
+        let mut rows = stmt.query((id, start_s, end_s))?;
+        while let Some(row) = rows.next()? {
+            // Decode straight out of SQLite's own buffer; collecting the blobs
+            // up front materialised every chunk in the range at once.
+            let blob = row.get_ref(0)?.as_blob().map_err(rusqlite::Error::from)?;
+            decode_chunk_into(blob, &mut chunk_points)?;
+        }
+        chunk_points.retain(|(ts, _)| (start_s..=end_s).contains(ts));
+        // The merge below needs one ascending run, which encode_chunk's
+        // ordered source and the ORDER BY above already give. Confirm it here
+        // rather than trust a cross-function invariant: a scan is noise next
+        // to the decode that produced these, and a blob that decoded to
+        // plausible-but-unordered points would otherwise skew the buckets
+        // silently.
+        if !chunk_points.is_sorted_by_key(|(ts, _)| *ts) {
+            chunk_points.sort_by_key(|(ts, _)| *ts);
         }
 
-        self.conn
-            .prepare_cached(
-                "SELECT ts_s, value FROM samples
-                 WHERE series_id = ?1 AND ts_s >= ?2 AND ts_s <= ?3",
-            )?
-            .query_map((id, start_s, end_s), |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
-            })?
-            .try_for_each(|row| {
-                row.map(|(ts, value)| {
-                    points.insert(ts, value);
-                })
-            })?;
+        let mut samples: Vec<(i64, f64)> = Vec::new();
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT ts_s, value FROM samples
+             WHERE series_id = ?1 AND ts_s >= ?2 AND ts_s <= ?3
+             ORDER BY ts_s",
+        )?;
+        let mut rows = stmt.query((id, start_s, end_s))?;
+        while let Some(row) = rows.next()? {
+            samples.push((row.get(0)?, row.get(1)?));
+        }
 
         // Average into step_ms buckets aligned to epoch multiples of step,
-        // which is the axis api.rs builds.
+        // which is the axis api.rs builds. Timestamps ascend, so bucket
+        // indices do too and each bucket closes when the next one opens.
         let step_ms = step_ms.max(1);
-        let mut buckets: BTreeMap<i64, (f64, u32)> = BTreeMap::new();
-        for (ts_s, value) in points {
-            let ts_ms = ts_s * 1000;
-            let bucket = ts_ms.div_euclid(step_ms) * step_ms;
-            let entry = buckets.entry(bucket).or_insert((0.0, 0));
-            entry.0 += value;
-            entry.1 += 1;
+        let mut buckets: Vec<(i64, f64, u32)> = Vec::new();
+        let mut add = |ts_s: i64, value: f64| {
+            let bucket = (ts_s * 1000).div_euclid(step_ms) * step_ms;
+            match buckets.last_mut() {
+                Some(open) if open.0 == bucket => {
+                    open.1 += value;
+                    open.2 += 1;
+                }
+                _ => buckets.push((bucket, value, 1)),
+            }
+        };
+        let (mut chunk_i, mut sample_i) = (0, 0);
+        loop {
+            let (ts, value) = match (chunk_points.get(chunk_i), samples.get(sample_i)) {
+                (Some(&chunk), Some(&sample)) if chunk.0 < sample.0 => {
+                    chunk_i += 1;
+                    chunk
+                }
+                (Some(&chunk), Some(&sample)) => {
+                    // A raw sample overrides the chunk point on its timestamp,
+                    // mirroring compact_and_prune's merge semantics.
+                    if chunk.0 == sample.0 {
+                        chunk_i += 1;
+                    }
+                    sample_i += 1;
+                    sample
+                }
+                (Some(&chunk), None) => {
+                    chunk_i += 1;
+                    chunk
+                }
+                (None, Some(&sample)) => {
+                    sample_i += 1;
+                    sample
+                }
+                (None, None) => break,
+            };
+            add(ts, value);
         }
         Ok(buckets
             .into_iter()
-            .map(|(ts, (sum, n))| (ts, sum / n as f64))
+            .map(|(ts, sum, n)| (ts, sum / n as f64))
             .collect())
     }
 }
@@ -417,19 +492,29 @@ fn encode_chunk(start_s: i64, samples: &BTreeMap<i64, f64>) -> Vec<u8> {
     for (&ts, &value) in samples {
         encoder.encode(DataPoint::new(ts.max(0) as u64, value));
     }
-    encoder.close().to_vec()
+    // `close` already hands back the writer's own buffer; `to_vec` copied the
+    // whole encoded chunk a second time to no end.
+    encoder.close().into_vec()
 }
 
-fn decode_chunk(blob: &[u8]) -> Result<Vec<(i64, f64)>> {
+/// Appends one chunk's points to `out`, so the query path can decode a whole
+/// range of chunks into a single run without a Vec per chunk.
+fn decode_chunk_into(blob: &[u8], out: &mut Vec<(i64, f64)>) -> Result<()> {
+    // tsz's reader takes ownership of a boxed slice, so it needs a copy of its
+    // own; `into_boxed_slice` on an exact-size Vec doesn't reallocate again.
     let mut decoder = StdDecoder::new(BufferedReader::new(blob.to_vec().into_boxed_slice()));
-    let mut points = Vec::new();
     loop {
         match decoder.next() {
-            Ok(dp) => points.push((dp.get_time() as i64, dp.get_value())),
-            Err(tsz::decode::Error::EndOfStream) => break,
+            Ok(dp) => out.push((dp.get_time() as i64, dp.get_value())),
+            Err(tsz::decode::Error::EndOfStream) => return Ok(()),
             Err(e) => return Err(StoreError::Codec(format!("{e:?}"))),
         }
     }
+}
+
+fn decode_chunk(blob: &[u8]) -> Result<Vec<(i64, f64)>> {
+    let mut points = Vec::new();
+    decode_chunk_into(blob, &mut points)?;
     Ok(points)
 }
 
@@ -822,5 +907,59 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res, vec![(15_000, 4.2)]);
+    }
+
+    /// The retention pass deletes by `end_s` while the chunks primary key
+    /// leads with `series_id`, so without a dedicated index every pass
+    /// full-scans the table holding nearly all of the data.
+    #[test]
+    fn retention_delete_does_not_scan_the_chunks_table() {
+        let (_dir, store) = store(Duration::from_secs(3600));
+        let inner = store.inner.lock().unwrap();
+        let plan: String = inner
+            .conn
+            .query_row(
+                "EXPLAIN QUERY PLAN DELETE FROM chunks WHERE end_s < 0",
+                [],
+                |row| row.get(3),
+            )
+            .unwrap();
+        assert!(
+            plan.contains("USING INDEX chunks_end_s"),
+            "retention must not scan chunks, got: {plan}"
+        );
+    }
+
+    #[test]
+    fn opening_an_existing_database_adds_the_retention_index() {
+        let dir = tempfile::tempdir().unwrap();
+        // A database written before the index existed.
+        let conn = Connection::open(dir.path().join("silph.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chunks (
+               series_id INTEGER NOT NULL,
+               start_s INTEGER NOT NULL,
+               end_s INTEGER NOT NULL,
+               data BLOB NOT NULL,
+               PRIMARY KEY (series_id, start_s)
+             ) WITHOUT ROWID;",
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = Store::open(dir.path(), Duration::from_secs(3600)).unwrap();
+        let indexes: i64 = store
+            .inner
+            .lock()
+            .unwrap()
+            .conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'chunks_end_s'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexes, 1, "existing databases gain the index on open");
     }
 }

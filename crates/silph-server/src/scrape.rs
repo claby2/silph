@@ -43,6 +43,16 @@ pub fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
+/// The host's state, inserting a default entry only the first time a host is
+/// seen. `BTreeMap::entry` takes an owned key, so reaching for it on every
+/// scrape cloned the host name whether or not the entry already existed.
+fn state_for<'a>(hosts: &'a mut BTreeMap<String, HostState>, name: &str) -> &'a mut HostState {
+    if !hosts.contains_key(name) {
+        hosts.insert(name.to_string(), HostState::default());
+    }
+    hosts.get_mut(name).expect("just inserted")
+}
+
 /// Scrape one target forever. Runs as its own tokio task.
 pub async fn scrape_loop(
     target: Target,
@@ -62,7 +72,7 @@ pub async fn scrape_loop(
             Err(e) => {
                 tracing::warn!(host = target.name, error = %e, "scrape failed");
                 let mut hosts = hosts.write().unwrap();
-                hosts.entry(target.name.clone()).or_default().last_error = Some(e);
+                state_for(&mut hosts, &target.name).last_error = Some(e);
             }
         }
     }
@@ -92,13 +102,12 @@ pub async fn scrape_once(
     // Take (not clone) the previous snapshot; it's replaced below either way.
     let prev = {
         let mut hosts = hosts.write().unwrap();
-        hosts
-            .entry(target.name.clone())
-            .or_default()
-            .last_raw
-            .take()
+        state_for(&mut hosts, &target.name).last_raw.take()
     };
-    let points: Vec<silph_core::Point> = METRICS
+    // Shared rather than owned so the store can take the points into its
+    // blocking task while the instance bookkeeping below still reads them;
+    // cloning the Vec meant re-allocating every instance label each scrape.
+    let points: Arc<[silph_core::Point]> = METRICS
         .iter()
         .flat_map(|m| m.process(prev.as_ref(), &curr))
         .collect();
@@ -106,14 +115,14 @@ pub async fn scrape_once(
     let point_count = points.len();
     if !points.is_empty() {
         store
-            .insert(&target.name, curr.ts_ms, points.clone())
+            .insert(&target.name, curr.ts_ms, Arc::clone(&points))
             .await
             .map_err(|e| format!("storage insert: {e}"))?;
     }
 
     let mut hosts = hosts.write().unwrap();
-    let state = hosts.entry(target.name.clone()).or_default();
-    for point in &points {
+    let state = state_for(&mut hosts, &target.name);
+    for point in points.iter() {
         if let Some(instance) = &point.instance {
             state
                 .instances

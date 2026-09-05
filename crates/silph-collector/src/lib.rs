@@ -71,7 +71,7 @@ async fn metrics(State(state): State<AppState>) -> Json<MetricsResponse> {
             Ok(values) => {
                 response
                     .values
-                    .extend(values.into_iter().map(|(k, v)| (k.to_string(), v)));
+                    .extend(values.into_iter().map(|(k, v)| (k.into_wire_key(), v)));
             }
             // Omit a failing category rather than failing the scrape; the flat
             // response tolerates missing keys.

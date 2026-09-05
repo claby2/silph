@@ -30,4 +30,7 @@ tempfile = "3"
 
 [profile.release]
 strip = true
-lto = "thin"
+lto = "fat"
+# Both daemons are long-running and small; trading compile time for whole-program
+# optimisation across codegen units is the right side of that deal here.
+codegen-units = 1
